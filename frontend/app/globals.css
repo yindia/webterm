@@ -1,0 +1,96 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+@import "xterm/css/xterm.css";
+@import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap");
+
+:root {
+  color-scheme: dark;
+  --app-bg: #0b1222;
+  --app-bg-highlight: #17223a;
+  --app-surface: #0f172a;
+  --app-surface-muted: #111827;
+  --app-border: #1f2937;
+  --app-text: #e2e8f0;
+  --app-text-muted: #94a3b8;
+  --app-accent: #7dd3fc;
+  --app-accent-strong: #38bdf8;
+  --term-bg: #030712;
+  --keyboard-offset: 0px;
+  --app-height: 100dvh;
+  --status-height: 2rem;
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+  --app-bg: #f4f6fb;
+  --app-bg-highlight: #ffffff;
+  --app-surface: #ffffff;
+  --app-surface-muted: #eef2f8;
+  --app-border: #d7deea;
+  --app-text: #0f172a;
+  --app-text-muted: #475569;
+  --app-accent: #0284c7;
+  --app-accent-strong: #0369a1;
+  --term-bg: #f8fafc;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  background: var(--app-bg);
+  color: var(--app-text);
+  font-family: "Space Grotesk", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+.app-root {
+  height: var(--app-height);
+  min-height: var(--app-height);
+}
+
+.terminal-layer {
+  position: absolute;
+  inset: 0;
+  bottom: calc(var(--keyboard-offset) + var(--status-height));
+}
+
+.terminal-layer.fullscreen {
+  bottom: calc(var(--keyboard-offset) + var(--status-height));
+}
+
+#__next {
+  width: 100%;
+  height: 100%;
+}
+
+/* Fill the terminal shell bg to cover xterm cell-rounding gaps */
+.terminal-shell {
+  background: var(--term-bg);
+  width: 100%;
+  height: 100%;
+}
+
+.terminal-shell .xterm {
+  box-sizing: border-box;
+  padding: clamp(8px, 1.4vw, 14px);
+  width: 100%;
+  height: 100%;
+}
+
+.terminal-shell .xterm-viewport {
+  overflow-y: auto !important;
+  background-color: var(--term-bg) !important;
+}
+
+/* Stretch the screen element so its bg covers right/bottom gaps */
+.terminal-shell .xterm-screen {
+  min-width: 100%;
+  min-height: 100%;
+}

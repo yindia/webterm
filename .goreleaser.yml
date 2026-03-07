@@ -1,0 +1,55 @@
+version: 2
+project_name: webterm
+
+builds:
+  - id: webterm
+    main: ./main.go
+    binary: webterm
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - "-s -w"
+
+archives:
+  - id: webterm
+    builds: [webterm]
+    format_overrides:
+      - goos: windows
+        format: zip
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: "checksums.txt"
+
+brews:
+  - ids: [webterm]
+    homepage: "https://github.com/yindia/webterm"
+    description: "Webhook router + worker SDK for GitHub, GitLab, Bitbucket. Route events by rules and consume via Watermill."
+    license: "MIT"
+    directory: Formula
+    repository:
+      owner: "yindia"
+      name: "homebrew-formula"
+    test: |
+      system "#{bin}/webterm", "--help"
+    install: |
+      bin.install "webterm"
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+
+release:
+  github:
+    owner: "yindia"
+    name: "webterm"
+  draft: true

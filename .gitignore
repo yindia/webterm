@@ -1,0 +1,21 @@
+# Go binary
+webterm
+
+# Frontend
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+
+# Embedded copy
+web/dist/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

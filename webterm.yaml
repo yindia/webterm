@@ -1,0 +1,29 @@
+server:
+    bind: 0.0.0.0
+    port: 8080
+auth:
+    mode: password
+    password_hash: $2a$10$L0kaLJ4DTAvcbfzwYrJ0S.uQMVemNCMJh8GFi5Rmml/h0BLlzwTHS
+    token: ""
+    session_ttl: 24h0m0s
+    csrf_secret: change-this-secret
+    rate_limit_max: 10
+    rate_limit_window: 10m
+terminal:
+    shell: /bin/zsh
+    working_dir: "~/workspace"
+    env: []
+    user: ""
+    group: ""
+policy:
+    whitelist_enabled: false
+    rules: []
+sessions:
+    max_sessions: 10
+    idle_timeout: 24h0m0s
+    snapshot_dir: "~/.webterm/snapshots"
+    snapshot_interval: 5s
+    snapshot_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+logging:
+    audit: true
+    level: debug
