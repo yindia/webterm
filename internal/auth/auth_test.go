@@ -6,18 +6,11 @@ import (
 	"testing"
 	"time"
 
-	"golang.org/x/crypto/bcrypt"
-
 	"webterm/internal/config"
 )
 
 func TestPasswordAuthSuccess(t *testing.T) {
-	hash, err := bcrypt.GenerateFromPassword([]byte("secret"), bcrypt.DefaultCost)
-	if err != nil {
-		t.Fatalf("hash generation failed: %v", err)
-	}
-
-	mgr, err := New(config.AuthConfig{Mode: "password", PasswordHash: string(hash), SessionTTL: time.Hour})
+	mgr, err := New(config.AuthConfig{Mode: "password", Password: "secret", SessionTTL: time.Hour})
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
 	}
@@ -32,48 +25,18 @@ func TestPasswordAuthSuccess(t *testing.T) {
 }
 
 func TestPasswordAuthRejectsInvalidSecret(t *testing.T) {
-	hash, err := bcrypt.GenerateFromPassword([]byte("secret"), bcrypt.DefaultCost)
-	if err != nil {
-		t.Fatalf("hash generation failed: %v", err)
-	}
-
-	mgr, err := New(config.AuthConfig{Mode: "password", PasswordHash: string(hash), SessionTTL: time.Hour})
+	mgr, err := New(config.AuthConfig{Mode: "password", Password: "secret", SessionTTL: time.Hour})
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
 	}
 
-	if _, err := mgr.Authenticate("wrong"); err == nil {
-		t.Fatalf("expected invalid credentials error")
-	}
-}
-
-func TestTokenAuthSuccess(t *testing.T) {
-	mgr, err := New(config.AuthConfig{Mode: "token", Token: "abc123", SessionTTL: time.Hour})
-	if err != nil {
-		t.Fatalf("New failed: %v", err)
-	}
-
-	if _, err := mgr.Authenticate("abc123"); err != nil {
-		t.Fatalf("Authenticate failed: %v", err)
-	}
-}
-
-func TestTokenAuthRejectsInvalidSecret(t *testing.T) {
-	mgr, err := New(config.AuthConfig{Mode: "token", Token: "abc123", SessionTTL: time.Hour})
-	if err != nil {
-		t.Fatalf("New failed: %v", err)
-	}
 	if _, err := mgr.Authenticate("wrong"); err == nil {
 		t.Fatalf("expected invalid credentials error")
 	}
 }
 
 func TestAuthenticateTrimsSecret(t *testing.T) {
-	hash, err := bcrypt.GenerateFromPassword([]byte("secret"), bcrypt.DefaultCost)
-	if err != nil {
-		t.Fatalf("hash generation failed: %v", err)
-	}
-	mgr, err := New(config.AuthConfig{Mode: "password", PasswordHash: string(hash), SessionTTL: time.Hour})
+	mgr, err := New(config.AuthConfig{Mode: "password", Password: "secret", SessionTTL: time.Hour})
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
 	}
@@ -86,26 +49,39 @@ func TestNewRejectsInvalidMode(t *testing.T) {
 	if _, err := New(config.AuthConfig{Mode: "unknown"}); err == nil {
 		t.Fatalf("expected error for invalid mode")
 	}
-}
-
-func TestNewRejectsMissingToken(t *testing.T) {
 	if _, err := New(config.AuthConfig{Mode: "token"}); err == nil {
-		t.Fatalf("expected error for missing token")
+		t.Fatalf("expected error for invalid mode")
 	}
 }
 
 func TestNewRejectsMissingPasswordHash(t *testing.T) {
 	if _, err := New(config.AuthConfig{Mode: "password"}); err == nil {
-		t.Fatalf("expected error for missing password hash")
+		t.Fatalf("expected error for missing password")
+	}
+}
+
+func TestPasswordAuthPlainSuccess(t *testing.T) {
+	mgr, err := New(config.AuthConfig{Mode: "password", Password: "secret", SessionTTL: time.Hour})
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+	if _, err := mgr.Authenticate("secret"); err != nil {
+		t.Fatalf("Authenticate failed: %v", err)
+	}
+}
+
+func TestPasswordAuthPlainRejectsInvalidSecret(t *testing.T) {
+	mgr, err := New(config.AuthConfig{Mode: "password", Password: "secret", SessionTTL: time.Hour})
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+	if _, err := mgr.Authenticate("wrong"); err == nil {
+		t.Fatalf("expected invalid credentials error")
 	}
 }
 
 func TestSessionExpires(t *testing.T) {
-	hash, err := bcrypt.GenerateFromPassword([]byte("secret"), bcrypt.DefaultCost)
-	if err != nil {
-		t.Fatalf("hash generation failed: %v", err)
-	}
-	mgr, err := New(config.AuthConfig{Mode: "password", PasswordHash: string(hash), SessionTTL: 1 * time.Nanosecond})
+	mgr, err := New(config.AuthConfig{Mode: "password", Password: "secret", SessionTTL: 1 * time.Nanosecond})
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
 	}
@@ -119,12 +95,12 @@ func TestSessionExpires(t *testing.T) {
 }
 
 func TestMode(t *testing.T) {
-	mgr, err := New(config.AuthConfig{Mode: "token", Token: "abc", SessionTTL: time.Hour})
+	mgr, err := New(config.AuthConfig{Mode: "password", Password: "abc", SessionTTL: time.Hour})
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
 	}
-	if mgr.Mode() != "token" {
-		t.Fatalf("expected token mode")
+	if mgr.Mode() != "password" {
+		t.Fatalf("expected password mode")
 	}
 }
 
@@ -139,12 +115,7 @@ func TestRandomTokenLength(t *testing.T) {
 }
 
 func TestSessionCookieLifecycle(t *testing.T) {
-	hash, err := bcrypt.GenerateFromPassword([]byte("secret"), bcrypt.DefaultCost)
-	if err != nil {
-		t.Fatalf("hash generation failed: %v", err)
-	}
-
-	mgr, err := New(config.AuthConfig{Mode: "password", PasswordHash: string(hash), SessionTTL: time.Hour})
+	mgr, err := New(config.AuthConfig{Mode: "password", Password: "secret", SessionTTL: time.Hour})
 	if err != nil {
 		t.Fatalf("New failed: %v", err)
 	}

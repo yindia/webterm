@@ -3,8 +3,7 @@ server:
     port: 8080
 auth:
     mode: password
-    password_hash: $2a$10$L0kaLJ4DTAvcbfzwYrJ0S.uQMVemNCMJh8GFi5Rmml/h0BLlzwTHS
-    token: ""
+    password: change-me
     session_ttl: 24h0m0s
     csrf_secret: change-this-secret
     rate_limit_max: 10
@@ -23,7 +22,7 @@ sessions:
     idle_timeout: 24h0m0s
     snapshot_dir: "~/.webterm/snapshots"
     snapshot_interval: 5s
-    snapshot_key: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+    snapshot_key: "change-me-snapshot"
 logging:
     audit: true
     level: debug

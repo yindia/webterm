@@ -7,11 +7,13 @@ import { HeaderBar } from "@/components/terminal/HeaderBar";
 import { LoginScreen } from "@/components/terminal/LoginScreen";
 import { MetricsModal } from "@/components/terminal/MetricsModal";
 import { MobileStatusStrip } from "@/components/terminal/MobileStatusStrip";
+import { QuickSwitcher } from "@/components/terminal/QuickSwitcher";
 import { SettingsModal } from "@/components/terminal/SettingsModal";
 import { StatusBar } from "@/components/terminal/StatusBar";
 import { TabsRow } from "@/components/terminal/TabsRow";
 import { TabActionsSheet } from "@/components/terminal/TabActionsSheet";
 import { TerminalStack } from "@/components/terminal/TerminalStack";
+import { ToastStack, ToastItem } from "@/components/terminal/ToastStack";
 import { MetricsSnapshot, SessionInfo } from "@/components/terminal/types";
 
 import type { Terminal } from "xterm";
@@ -101,6 +103,12 @@ export default function Page() {
   const [detachedSessionId, setDetachedSessionId] = useState<string | null>(null);
   const [isDetached, setIsDetached] = useState(false);
   const [tabActionsId, setTabActionsId] = useState<string | null>(null);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renamingValue, setRenamingValue] = useState("");
+  const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const [quickSwitchOpen, setQuickSwitchOpen] = useState(false);
+  const [quickQuery, setQuickQuery] = useState("");
+  const [idleTimeoutSec, setIdleTimeoutSec] = useState(0);
 
   /* ---- refs ---- */
   const csrfRef = useRef("");
@@ -110,6 +118,8 @@ export default function Page() {
   const timersRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
   const tabHoldTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
   const mountedRef = useRef(true);
+  const lastActivityRef = useRef<Map<string, number>>(new Map());
+  const idleWarnedRef = useRef<Set<string>>(new Set());
 
   /* keep activeIdRef in sync */
   useEffect(() => {
@@ -183,6 +193,17 @@ export default function Page() {
     return id;
   }, []);
 
+  const pushToast = useCallback(
+    (message: string, tone: ToastItem["tone"] = "info") => {
+      const id = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      setToasts((prev) => [...prev, { id, message, tone }]);
+      safeTimeout(() => {
+        setToasts((prev) => prev.filter((toast) => toast.id !== id));
+      }, 2500);
+    },
+    [safeTimeout],
+  );
+
   const toggleTheme = useCallback(() => {
     setTheme((prev) => {
       const next = prev === "dark" ? "light" : "dark";
@@ -194,6 +215,11 @@ export default function Page() {
 
   const getCSRFToken = useCallback(() => {
     return csrfRef.current || getCookie("webterm_csrf");
+  }, []);
+
+  const markActivity = useCallback((id: string) => {
+    lastActivityRef.current.set(id, Date.now());
+    idleWarnedRef.current.delete(id);
   }, []);
 
   const postInput = useCallback(
@@ -257,6 +283,34 @@ export default function Page() {
     url.searchParams.set("detached", "1");
     window.open(url.toString(), `_blank`, "noopener,noreferrer");
   }, []);
+
+  const renameSession = useCallback(
+    async (id: string, name: string) => {
+      const csrf = getCSRFToken();
+      if (!csrf) return;
+      try {
+        const res = await fetch(`/api/terminal/sessions/${id}`, {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            "X-CSRF-Token": csrf,
+          },
+          credentials: "include",
+          body: JSON.stringify({ name }),
+        });
+        if (!res.ok) {
+          pushToast("Rename failed", "error");
+          return;
+        }
+        const data: { id: string; name: string } = await res.json();
+        setSessions((prev) => prev.map((s) => (s.id === data.id ? { ...s, name: data.name } : s)));
+        pushToast("Tab renamed", "success");
+      } catch {
+        pushToast("Rename failed", "error");
+      }
+    },
+    [getCSRFToken, pushToast],
+  );
 
   /* ---------------------------------------------------------------- */
   /*  Terminal lifecycle                                                */
@@ -397,6 +451,7 @@ export default function Page() {
       const handleStream = (data: string, onDone?: () => void) => {
         if (!data) return;
         const bytes = decodeBase64ToBytes(data);
+        markActivity(session.id);
         st.terminal.write(bytes, onDone);
       };
 
@@ -484,6 +539,7 @@ export default function Page() {
           if (isMouse && !allowMouse) return;
           if (isFocus && !allowFocus) return;
         }
+        markActivity(session.id);
         void postInput(session.id, input);
       });
 
@@ -492,6 +548,7 @@ export default function Page() {
       });
 
       terminalsRef.current.set(session.id, st);
+      markActivity(session.id);
       setSessions((prev) => (prev.some((s) => s.id === session.id) ? prev : [...prev, session]));
       switchToSession(session.id);
 
@@ -554,9 +611,52 @@ export default function Page() {
       } catch (err) {
         void err;
       }
-    },
-    [dropSessionLocal],
+  },
+  [dropSessionLocal],
   );
+
+  const handleCopy = useCallback(async () => {
+    const id = activeIdRef.current;
+    if (!id) {
+      pushToast("No active tab", "error");
+      return;
+    }
+    const st = terminalsRef.current.get(id);
+    if (!st) {
+      pushToast("No active tab", "error");
+      return;
+    }
+    const selection = st.terminal.getSelection();
+    if (!selection) {
+      pushToast("No selection to copy", "info");
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(selection);
+      pushToast("Copied selection", "success");
+    } catch {
+      pushToast("Copy failed", "error");
+    }
+  }, [pushToast]);
+
+  const handlePaste = useCallback(async () => {
+    const id = activeIdRef.current;
+    if (!id) {
+      pushToast("No active tab", "error");
+      return;
+    }
+    try {
+      const text = await navigator.clipboard.readText();
+      if (!text) {
+        pushToast("Clipboard empty", "info");
+        return;
+      }
+      await postInput(id, text);
+      pushToast("Pasted", "success");
+    } catch {
+      pushToast("Paste failed", "error");
+    }
+  }, [postInput, pushToast]);
 
   /* ---------------------------------------------------------------- */
   /*  Auth                                                             */
@@ -566,8 +666,11 @@ export default function Page() {
     try {
       const res = await fetch("/api/me", { credentials: "include" });
       if (res.ok) {
-        const data: { csrf_token?: string } = await res.json();
+        const data: { csrf_token?: string; idle_timeout_seconds?: number } = await res.json();
         if (data.csrf_token) csrfRef.current = data.csrf_token;
+        if (typeof data.idle_timeout_seconds === "number") {
+          setIdleTimeoutSec(data.idle_timeout_seconds);
+        }
         setAuthenticated(true);
         return true;
       }
@@ -731,6 +834,26 @@ export default function Page() {
   }, [authenticated, metricsPage]);
 
   useEffect(() => {
+    if (!authenticated) return;
+    if (idleTimeoutSec <= 0) return;
+    const warnAtMs = Math.max(0, idleTimeoutSec * 1000 - 5 * 60 * 1000);
+    const id = window.setInterval(() => {
+      const activeId = activeIdRef.current;
+      if (!activeId) return;
+      const last = lastActivityRef.current.get(activeId);
+      if (!last) return;
+      const idleFor = Date.now() - last;
+      if (idleFor >= warnAtMs && !idleWarnedRef.current.has(activeId)) {
+        idleWarnedRef.current.add(activeId);
+        const remaining = Math.max(0, idleTimeoutSec * 1000 - idleFor);
+        const minutes = Math.max(1, Math.ceil(remaining / 60000));
+        pushToast(`Idle timeout in ${minutes} min`, "info");
+      }
+    }, 30000);
+    return () => window.clearInterval(id);
+  }, [authenticated, idleTimeoutSec, pushToast]);
+
+  useEffect(() => {
     if (typeof window === "undefined") return;
     const updateViewport = () => {
       const vv = window.visualViewport;
@@ -823,43 +946,6 @@ export default function Page() {
     };
   }, [fitActive, deferredFitActive, safeTimeout]);
 
-  /* keyboard shortcuts */
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (!e.altKey || !e.shiftKey) return;
-
-      if (e.code === "KeyN") {
-        e.preventDefault();
-        if (canCreateSession) {
-          createSession();
-        }
-        return;
-      }
-
-      if (e.code === "KeyF") {
-        e.preventDefault();
-        toggleFullscreen();
-        return;
-      }
-
-      if (e.code === "ArrowLeft" || e.code === "ArrowRight") {
-        e.preventDefault();
-        if (sessions.length < 2) return;
-        const idx = sessions.findIndex((s) => s.id === activeIdRef.current);
-        if (idx === -1) return;
-        const next =
-          e.code === "ArrowLeft"
-            ? (idx - 1 + sessions.length) % sessions.length
-            : (idx + 1) % sessions.length;
-        switchToSession(sessions[next].id);
-      }
-    };
-
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessions, createSession, switchToSession]);
-
   /* ---------------------------------------------------------------- */
   /*  Fullscreen                                                       */
   /* ---------------------------------------------------------------- */
@@ -890,6 +976,52 @@ export default function Page() {
     }
     return orderedSessions;
   }, [detachedSessionId, isDetached, orderedSessions]);
+
+  /* keyboard shortcuts */
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.code === "KeyK") {
+        e.preventDefault();
+        const target = e.target as HTMLElement | null;
+        if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) return;
+        setQuickSwitchOpen(true);
+        return;
+      }
+      if (!e.altKey || !e.shiftKey) return;
+
+      if (e.code === "KeyN") {
+        e.preventDefault();
+        if (!canCreateSession) {
+          pushToast("Maximum of 5 terminals reached", "info");
+          return;
+        }
+        createSession();
+        return;
+      }
+
+      if (e.code === "KeyF") {
+        e.preventDefault();
+        toggleFullscreen();
+        return;
+      }
+
+      if (e.code === "ArrowLeft" || e.code === "ArrowRight") {
+        e.preventDefault();
+        if (sessions.length < 2) return;
+        const idx = sessions.findIndex((s) => s.id === activeIdRef.current);
+        if (idx === -1) return;
+        const next =
+          e.code === "ArrowLeft"
+            ? (idx - 1 + sessions.length) % sessions.length
+            : (idx + 1) % sessions.length;
+        switchToSession(sessions[next].id);
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessions, createSession, switchToSession, toggleFullscreen, canCreateSession, pushToast]);
 
   /* ================================================================ */
   /*  LOGIN SCREEN                                                     */
@@ -939,7 +1071,15 @@ export default function Page() {
           dragId={dragId}
           canCreateSession={canCreateSession}
           isFullscreen={isFullscreen}
-          onCreateSession={createSession}
+          renamingId={renamingId}
+          renamingValue={renamingValue}
+          onCreateSession={() => {
+            if (!canCreateSession) {
+              pushToast("Maximum of 5 terminals reached", "info");
+              return;
+            }
+            createSession();
+          }}
           onToggleFullscreen={toggleFullscreen}
           onSwitchSession={switchToSession}
           onDetachSession={(id) => {
@@ -959,6 +1099,28 @@ export default function Page() {
             if (timer) window.clearTimeout(timer);
             tabHoldTimersRef.current.delete(id);
           }}
+          onRenameStart={(id) => {
+            const session = sessions.find((s) => s.id === id);
+            if (!session) return;
+            setRenamingId(id);
+            setRenamingValue(session.name);
+          }}
+          onRenameChange={setRenamingValue}
+          onRenameSubmit={async () => {
+            if (!renamingId) return;
+            const nextName = renamingValue.trim();
+            if (!nextName) {
+              pushToast("Name required", "error");
+              return;
+            }
+            await renameSession(renamingId, nextName);
+            setRenamingId(null);
+            setRenamingValue("");
+          }}
+          onRenameCancel={() => {
+            setRenamingId(null);
+            setRenamingValue("");
+          }}
         />
         {/* ---- terminal area ---- */}
         <TerminalStack
@@ -971,6 +1133,8 @@ export default function Page() {
         showConnected={showConnected}
         activeSession={activeSession ?? null}
         onOpenSettings={() => setSettingsOpen(true)}
+        onCopy={handleCopy}
+        onPaste={handlePaste}
       />
 
       <SettingsModal
@@ -1000,6 +1164,14 @@ export default function Page() {
           switchToSession(id);
           setTabActionsId(null);
         }}
+        onRename={(id) => {
+          const session = sessions.find((s) => s.id === id);
+          if (session) {
+            setRenamingId(id);
+            setRenamingValue(session.name);
+          }
+          setTabActionsId(null);
+        }}
         onDetach={(id) => {
           dropSessionLocal(id);
           openDetached(id);
@@ -1010,6 +1182,23 @@ export default function Page() {
           setTabActionsId(null);
         }}
       />
+      <QuickSwitcher
+        open={quickSwitchOpen}
+        query={quickQuery}
+        sessions={visibleSessions}
+        activeId={activeId}
+        onClose={() => {
+          setQuickSwitchOpen(false);
+          setQuickQuery("");
+        }}
+        onQueryChange={setQuickQuery}
+        onSelect={(id) => {
+          switchToSession(id);
+          setQuickSwitchOpen(false);
+          setQuickQuery("");
+        }}
+      />
+      <ToastStack toasts={toasts} />
     </div>
   );
 }

@@ -24,8 +24,7 @@ type ServerConfig struct {
 
 type AuthConfig struct {
 	Mode            string        `yaml:"mode"`
-	PasswordHash    string        `yaml:"password_hash"`
-	Token           string        `yaml:"token"`
+	Password        string        `yaml:"password"`
 	SessionTTL      time.Duration `yaml:"session_ttl"`
 	CSRFSecret      string        `yaml:"csrf_secret"`
 	RateLimitMax    int           `yaml:"rate_limit_max"`
@@ -33,11 +32,10 @@ type AuthConfig struct {
 }
 
 type TerminalConfig struct {
-	Shell      string   `yaml:"shell"`
-	WorkingDir string   `yaml:"working_dir"`
-	Env        []string `yaml:"env"`
-	User       string   `yaml:"user"`
-	Group      string   `yaml:"group"`
+	Shell      string `yaml:"shell"`
+	WorkingDir string `yaml:"working_dir"`
+	User       string `yaml:"user"`
+	Group      string `yaml:"group"`
 }
 
 type PolicyConfig struct {
@@ -79,7 +77,6 @@ func Default() Config {
 		Terminal: TerminalConfig{
 			Shell:      "/bin/bash",
 			WorkingDir: "~",
-			Env:        []string{},
 			User:       "",
 			Group:      "",
 		},

@@ -10,6 +10,7 @@ interface TabActionsSheetProps {
   session: SessionInfo | null;
   onClose: () => void;
   onSwitch: (id: string) => void;
+  onRename: (id: string) => void;
   onDetach: (id: string) => void;
   onCloseSession: (id: string) => void;
 }
@@ -18,6 +19,7 @@ export function TabActionsSheet({
   session,
   onClose,
   onSwitch,
+  onRename,
   onDetach,
   onCloseSession,
 }: TabActionsSheetProps) {
@@ -40,6 +42,13 @@ export function TabActionsSheet({
             onClick={() => onSwitch(session.id)}
           >
             Switch to tab
+          </Button>
+          <Button
+            variant="secondary"
+            className="w-full justify-start"
+            onClick={() => onRename(session.id)}
+          >
+            Rename tab
           </Button>
           <Button
             variant="secondary"

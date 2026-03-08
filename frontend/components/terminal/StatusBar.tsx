@@ -1,6 +1,6 @@
 "use client";
 
-import { Settings } from "lucide-react";
+import { ClipboardPaste, Copy, Settings } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 
@@ -10,9 +10,11 @@ interface StatusBarProps {
   showConnected: boolean;
   activeSession: SessionInfo | null;
   onOpenSettings: () => void;
+  onCopy: () => void;
+  onPaste: () => void;
 }
 
-export function StatusBar({ showConnected, activeSession, onOpenSettings }: StatusBarProps) {
+export function StatusBar({ showConnected, activeSession, onOpenSettings, onCopy, onPaste }: StatusBarProps) {
   return (
     <div className="fixed bottom-0 left-0 right-0 z-30 flex h-8 items-center justify-between border-t border-[var(--app-border)] bg-[var(--app-surface)]/90 px-4 text-xs text-[var(--app-text-muted)] backdrop-blur">
       <span>
@@ -23,6 +25,26 @@ export function StatusBar({ showConnected, activeSession, onOpenSettings }: Stat
         <span className="hidden sm:inline">
           Alt+Shift+N new tab · Alt+Shift+←/→ switch · Alt+Shift+F fullscreen
         </span>
+        <div className="flex items-center gap-2 sm:hidden">
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 w-7 p-0 text-[var(--app-text-muted)] hover:text-[var(--app-text)]"
+            onClick={onCopy}
+            aria-label="Copy selection"
+          >
+            <Copy className="h-4 w-4" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 w-7 p-0 text-[var(--app-text-muted)] hover:text-[var(--app-text)]"
+            onClick={onPaste}
+            aria-label="Paste"
+          >
+            <ClipboardPaste className="h-4 w-4" />
+          </Button>
+        </div>
         <Button
           variant="ghost"
           size="sm"

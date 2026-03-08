@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 
 	"github.com/spf13/cobra"
-	"golang.org/x/crypto/bcrypt"
 
 	"webterm/internal/config"
 )
@@ -29,13 +28,9 @@ func newConfigCommand() *cobra.Command {
 				return err
 			}
 
-			hash, err := bcrypt.GenerateFromPassword([]byte("change-me"), bcrypt.DefaultCost)
-			if err != nil {
-				return err
-			}
-
 			cfg := config.Default()
-			cfg.Auth.PasswordHash = string(hash)
+			cfg.Auth.Password = "change-me"
+			cfg.Sessions.SnapshotKey = "change-me-snapshot"
 
 			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 				return err
@@ -46,7 +41,7 @@ func newConfigCommand() *cobra.Command {
 			}
 
 			fmt.Printf("created config template at %s\n", path)
-			fmt.Println("default password for template hash is: change-me")
+			fmt.Println("default password: change-me")
 			return nil
 		},
 	}

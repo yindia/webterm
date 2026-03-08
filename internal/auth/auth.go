@@ -10,8 +10,6 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/crypto/bcrypt"
-
 	"webterm/internal/config"
 )
 
@@ -27,10 +25,9 @@ type Session struct {
 }
 
 type Manager struct {
-	mode         string
-	passwordHash string
-	token        string
-	ttl          time.Duration
+	mode     string
+	password string
+	ttl      time.Duration
 
 	mu       sync.RWMutex
 	sessions map[string]Session
@@ -42,27 +39,23 @@ func New(cfg config.AuthConfig) (*Manager, error) {
 		mode = "password"
 	}
 
-	if mode != "password" && mode != "token" {
-		return nil, errors.New("auth mode must be password or token")
+	if mode != "password" {
+		return nil, errors.New("auth mode must be password")
 	}
 
 	if cfg.SessionTTL <= 0 {
 		cfg.SessionTTL = 24 * time.Hour
 	}
 
-	if mode == "password" && strings.TrimSpace(cfg.PasswordHash) == "" {
-		return nil, errors.New("password mode requires auth.password_hash")
-	}
-	if mode == "token" && strings.TrimSpace(cfg.Token) == "" {
-		return nil, errors.New("token mode requires auth.token")
+	if strings.TrimSpace(cfg.Password) == "" {
+		return nil, errors.New("password mode requires auth.password")
 	}
 
 	return &Manager{
-		mode:         mode,
-		passwordHash: cfg.PasswordHash,
-		token:        cfg.Token,
-		ttl:          cfg.SessionTTL,
-		sessions:     map[string]Session{},
+		mode:     mode,
+		password: cfg.Password,
+		ttl:      cfg.SessionTTL,
+		sessions: map[string]Session{},
 	}, nil
 }
 
@@ -74,11 +67,7 @@ func (m *Manager) Authenticate(secret string) (Session, error) {
 	secret = strings.TrimSpace(secret)
 	switch m.mode {
 	case "password":
-		if err := bcrypt.CompareHashAndPassword([]byte(m.passwordHash), []byte(secret)); err != nil {
-			return Session{}, errors.New("invalid credentials")
-		}
-	case "token":
-		if subtle.ConstantTimeCompare([]byte(secret), []byte(m.token)) != 1 {
+		if subtle.ConstantTimeCompare([]byte(secret), []byte(strings.TrimSpace(m.password))) != 1 {
 			return Session{}, errors.New("invalid credentials")
 		}
 	default:

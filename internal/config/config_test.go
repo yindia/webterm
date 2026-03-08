@@ -29,8 +29,8 @@ func TestWriteLoadRoundTrip(t *testing.T) {
 
 	cfg := Default()
 	cfg.Server.Port = 9090
-	cfg.Auth.Mode = "token"
-	cfg.Auth.Token = "abc123"
+	cfg.Auth.Mode = "password"
+	cfg.Auth.Password = "abc123"
 	cfg.Sessions.SnapshotDir = ""
 	cfg.Sessions.SnapshotInterval = 12 * time.Second
 
@@ -46,11 +46,11 @@ func TestWriteLoadRoundTrip(t *testing.T) {
 	if loaded.Server.Port != 9090 {
 		t.Fatalf("expected port to round-trip")
 	}
-	if loaded.Auth.Mode != "token" {
+	if loaded.Auth.Mode != "password" {
 		t.Fatalf("expected auth mode to round-trip")
 	}
-	if loaded.Auth.Token != "abc123" {
-		t.Fatalf("expected token to round-trip")
+	if loaded.Auth.Password != "abc123" {
+		t.Fatalf("expected password to round-trip")
 	}
 	if loaded.Sessions.SnapshotInterval != 12*time.Second {
 		t.Fatalf("expected snapshot interval to round-trip")

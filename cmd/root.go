@@ -12,6 +12,7 @@ func NewRootCommand() *cobra.Command {
 	root.AddCommand(newDoctorCommand())
 	root.AddCommand(newConfigCommand())
 	root.AddCommand(newVersionCommand())
+	root.AddCommand(newCompletionCommand())
 
 	return root
 }

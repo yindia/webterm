@@ -59,6 +59,17 @@ func (f *fakeTerminalManager) Create(name string, cols uint16, rows uint16) (*te
 	return s, nil
 }
 
+func (f *fakeTerminalManager) Rename(id string, name string) (*terminal.Session, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	s, ok := f.sessions[id]
+	if !ok {
+		return nil, errors.New("session not found")
+	}
+	s.Name = name
+	return s, nil
+}
+
 func (f *fakeTerminalManager) Close(id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -117,8 +128,8 @@ func attachCookies(rec *httptest.ResponseRecorder, req *http.Request) {
 func newTestApp(t *testing.T) *app {
 	t.Helper()
 	cfg := config.Default()
-	cfg.Auth.Mode = "token"
-	cfg.Auth.Token = "test-token"
+	cfg.Auth.Mode = "password"
+	cfg.Auth.Password = "test-token"
 	cfg.Sessions.SnapshotDir = ""
 
 	authManager, err := auth.New(cfg.Auth)
@@ -134,6 +145,7 @@ func newTestApp(t *testing.T) *app {
 		terminals:    termManager,
 		limiter:      newLoginLimiter(2, time.Minute),
 		streamCancel: map[string]context.CancelFunc{},
+		idleTimeout:  cfg.Sessions.IdleTimeout,
 	}
 }
 
@@ -171,7 +183,7 @@ func TestLoginRateLimit(t *testing.T) {
 	a := newTestApp(t)
 	defer a.terminals.CloseAll()
 
-	body := `{"token":"bad"}`
+	body := `{"password":"bad"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/login", strings.NewReader(body))
 	rec := httptest.NewRecorder()
 	a.loginHandler(rec, req)
@@ -217,7 +229,7 @@ func TestLoginSuccessAfterFailure(t *testing.T) {
 	a := newTestApp(t)
 	defer a.terminals.CloseAll()
 
-	bad := `{"token":"bad"}`
+	bad := `{"password":"bad"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/login", strings.NewReader(bad))
 	rec := httptest.NewRecorder()
 	a.loginHandler(rec, req)
@@ -225,7 +237,7 @@ func TestLoginSuccessAfterFailure(t *testing.T) {
 		t.Fatalf("expected 401, got %d", rec.Code)
 	}
 
-	good := `{"token":"test-token"}`
+	good := `{"password":"test-token"}`
 	req2 := httptest.NewRequest(http.MethodPost, "/api/login", strings.NewReader(good))
 	rec2 := httptest.NewRecorder()
 	a.loginHandler(rec2, req2)
@@ -287,6 +299,50 @@ func TestSessionByIDHandlerDelete(t *testing.T) {
 	}
 }
 
+func TestSessionByIDHandlerRename(t *testing.T) {
+	a := newTestApp(t)
+	defer a.terminals.CloseAll()
+
+	s, err := a.terminals.Create("one", 80, 24)
+	if err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/terminal/sessions/"+s.ID, strings.NewReader(`{"name":"renamed"}`))
+	rec := httptest.NewRecorder()
+	a.sessionByIDHandler(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", rec.Code)
+	}
+	var body struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&body); err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+	if body.ID != s.ID || body.Name != "renamed" {
+		t.Fatalf("unexpected response: %+v", body)
+	}
+}
+
+func TestSessionByIDHandlerRenameRequiresName(t *testing.T) {
+	a := newTestApp(t)
+	defer a.terminals.CloseAll()
+
+	s, err := a.terminals.Create("one", 80, 24)
+	if err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/terminal/sessions/"+s.ID, strings.NewReader(`{"name":""}`))
+	rec := httptest.NewRecorder()
+	a.sessionByIDHandler(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", rec.Code)
+	}
+}
+
 func TestSessionByIDHandlerNotFound(t *testing.T) {
 	a := newTestApp(t)
 	defer a.terminals.CloseAll()
@@ -303,7 +359,7 @@ func TestSessionByIDHandlerRejectsMethod(t *testing.T) {
 	a := newTestApp(t)
 	defer a.terminals.CloseAll()
 
-	req := httptest.NewRequest(http.MethodGet, "/api/terminal/sessions/abc", nil)
+	req := httptest.NewRequest(http.MethodPut, "/api/terminal/sessions/abc", nil)
 	rec := httptest.NewRecorder()
 	a.sessionByIDHandler(rec, req)
 	if rec.Code != http.StatusMethodNotAllowed {
@@ -520,7 +576,7 @@ func TestLoginSuccessAndMe(t *testing.T) {
 	a := newTestApp(t)
 	defer a.terminals.CloseAll()
 
-	body := `{"token":"test-token"}`
+	body := `{"password":"test-token"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/login", strings.NewReader(body))
 	rec := httptest.NewRecorder()
 	a.loginHandler(rec, req)
@@ -622,8 +678,8 @@ func TestWithAuthRejectsMissingSession(t *testing.T) {
 
 func TestWithAuthRejectsExpiredSession(t *testing.T) {
 	cfg := config.Default()
-	cfg.Auth.Mode = "token"
-	cfg.Auth.Token = "test-token"
+	cfg.Auth.Mode = "password"
+	cfg.Auth.Password = "test-token"
 	cfg.Auth.SessionTTL = 1 * time.Nanosecond
 	cfg.Sessions.SnapshotDir = ""
 
@@ -640,6 +696,7 @@ func TestWithAuthRejectsExpiredSession(t *testing.T) {
 		terminals:    termManager,
 		limiter:      newLoginLimiter(2, time.Minute),
 		streamCancel: map[string]context.CancelFunc{},
+		idleTimeout:  cfg.Sessions.IdleTimeout,
 	}
 	defer termManager.CloseAll()
 
@@ -769,7 +826,7 @@ func (n *noFlushResponseWriter) WriteHeader(status int) {
 }
 
 func TestTerminalStreamRequiresFlusher(t *testing.T) {
-	authManager, err := auth.New(config.AuthConfig{Mode: "token", Token: "test-token", SessionTTL: time.Hour})
+	authManager, err := auth.New(config.AuthConfig{Mode: "password", Password: "test-token", SessionTTL: time.Hour})
 	if err != nil {
 		t.Fatalf("auth.New failed: %v", err)
 	}
@@ -794,7 +851,7 @@ func TestTerminalStreamRequiresFlusher(t *testing.T) {
 }
 
 func TestTerminalStreamSnapshotWritesHistory(t *testing.T) {
-	authManager, err := auth.New(config.AuthConfig{Mode: "token", Token: "test-token", SessionTTL: time.Hour})
+	authManager, err := auth.New(config.AuthConfig{Mode: "password", Password: "test-token", SessionTTL: time.Hour})
 	if err != nil {
 		t.Fatalf("auth.New failed: %v", err)
 	}
@@ -890,8 +947,8 @@ func TestRunShutdown(t *testing.T) {
 	cfg := config.Default()
 	cfg.Server.Bind = "127.0.0.1"
 	cfg.Server.Port = 0
-	cfg.Auth.Mode = "token"
-	cfg.Auth.Token = "test-token"
+	cfg.Auth.Mode = "password"
+	cfg.Auth.Password = "test-token"
 	cfg.Sessions.SnapshotDir = ""
 
 	ctx, cancel := context.WithCancel(context.Background())

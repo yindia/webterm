@@ -30,6 +30,7 @@ type terminalManager interface {
 	List() []*terminal.Session
 	Get(id string) (*terminal.Session, bool)
 	Create(name string, cols uint16, rows uint16) (*terminal.Session, error)
+	Rename(id string, name string) (*terminal.Session, error)
 	Close(id string) error
 	CloseAll()
 	Read(id string, buf []byte) (int, error)
@@ -44,6 +45,7 @@ type app struct {
 	limiter      *loginLimiter
 	streamMu     sync.Mutex
 	streamCancel map[string]context.CancelFunc
+	idleTimeout  time.Duration
 }
 
 type contextKey string
@@ -136,6 +138,10 @@ func Run(ctx context.Context, cfg config.Config) error {
 		terminals:    terminalManager,
 		limiter:      newLoginLimiter(cfg.Auth.RateLimitMax, cfg.Auth.RateLimitWindow),
 		streamCancel: map[string]context.CancelFunc{},
+		idleTimeout:  cfg.Sessions.IdleTimeout,
+	}
+	if application.idleTimeout <= 0 {
+		application.idleTimeout = 24 * time.Hour
 	}
 
 	defer terminalManager.CloseAll()
@@ -208,19 +214,13 @@ func (a *app) loginHandler(w http.ResponseWriter, r *http.Request) {
 
 	var req struct {
 		Password string `json:"password"`
-		Token    string `json:"token"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid json body", http.StatusBadRequest)
 		return
 	}
 
-	secret := req.Password
-	if a.auth.Mode() == "token" {
-		secret = req.Token
-	}
-
-	session, err := a.auth.Authenticate(secret)
+	session, err := a.auth.Authenticate(req.Password)
 	if err != nil {
 		http.Error(w, "invalid credentials", http.StatusUnauthorized)
 		return
@@ -255,9 +255,10 @@ func (a *app) meHandler(w http.ResponseWriter, r *http.Request) {
 
 	session := sessionFromContext(r.Context())
 	writeJSON(w, http.StatusOK, map[string]any{
-		"authenticated": true,
-		"expires_at":    session.ExpiresAt,
-		"auth_mode":     a.auth.Mode(),
+		"authenticated":        true,
+		"expires_at":           session.ExpiresAt,
+		"auth_mode":            a.auth.Mode(),
+		"idle_timeout_seconds": int64(a.idleTimeout.Seconds()),
 	})
 }
 
@@ -328,21 +329,45 @@ func (a *app) sessionsHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) sessionByIDHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodDelete {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	id := strings.TrimPrefix(r.URL.Path, "/api/terminal/sessions/")
 	id = strings.TrimSpace(id)
 	if id == "" {
 		http.Error(w, "session id required", http.StatusBadRequest)
 		return
 	}
-	if err := a.terminals.Close(id); err != nil {
-		http.Error(w, "session not found", http.StatusNotFound)
-		return
+
+	switch r.Method {
+	case http.MethodDelete:
+		if err := a.terminals.Close(id); err != nil {
+			http.Error(w, "session not found", http.StatusNotFound)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "closed"})
+	case http.MethodPatch:
+		var req struct {
+			Name string `json:"name"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid json body", http.StatusBadRequest)
+			return
+		}
+		name := strings.TrimSpace(req.Name)
+		if name == "" {
+			http.Error(w, "name required", http.StatusBadRequest)
+			return
+		}
+		s, err := a.terminals.Rename(id, name)
+		if err != nil {
+			http.Error(w, "session not found", http.StatusNotFound)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"id":   s.ID,
+			"name": s.Name,
+		})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "closed"})
 }
 
 func (a *app) terminalStreamHandler(w http.ResponseWriter, r *http.Request) {

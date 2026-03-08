@@ -14,6 +14,8 @@ interface TabsRowProps {
   dragId: string | null;
   canCreateSession: boolean;
   isFullscreen: boolean;
+  renamingId: string | null;
+  renamingValue: string;
   onCreateSession: () => void;
   onToggleFullscreen: () => void;
   onSwitchSession: (id: string) => void;
@@ -24,6 +26,10 @@ interface TabsRowProps {
   onOpenTabActions: (id: string) => void;
   onTabHoldStart: (id: string) => void;
   onTabHoldEnd: (id: string) => void;
+  onRenameStart: (id: string) => void;
+  onRenameChange: (value: string) => void;
+  onRenameSubmit: () => void;
+  onRenameCancel: () => void;
 }
 
 export function TabsRow({
@@ -32,6 +38,8 @@ export function TabsRow({
   dragId,
   canCreateSession,
   isFullscreen,
+  renamingId,
+  renamingValue,
   onCreateSession,
   onToggleFullscreen,
   onSwitchSession,
@@ -42,6 +50,10 @@ export function TabsRow({
   onOpenTabActions,
   onTabHoldStart,
   onTabHoldEnd,
+  onRenameStart,
+  onRenameChange,
+  onRenameSubmit,
+  onRenameCancel,
 }: TabsRowProps) {
   return (
     <div
@@ -55,6 +67,7 @@ export function TabsRow({
       <div className="pointer-events-none absolute right-0 top-0 h-full w-5 bg-gradient-to-l from-[var(--app-surface)]/90 to-transparent sm:hidden" />
       <div className="flex min-w-0 flex-1 items-center gap-2 overflow-x-auto max-sm:scroll-px-2 max-sm:snap-x max-sm:snap-mandatory">
         {sessions.map((s) => (
+          
           <div
             key={`tab-${s.id}`}
             role="button"
@@ -73,6 +86,7 @@ export function TabsRow({
                 onSwitchSession(s.id);
               }
             }}
+            onDoubleClick={() => onRenameStart(s.id)}
             onContextMenu={(event) => {
               event.preventDefault();
               onOpenTabActions(s.id);
@@ -81,7 +95,7 @@ export function TabsRow({
             onPointerUp={() => onTabHoldEnd(s.id)}
             onPointerLeave={() => onTabHoldEnd(s.id)}
             onPointerCancel={() => onTabHoldEnd(s.id)}
-            draggable
+            draggable={renamingId !== s.id}
             onDragStart={() => onSetDragId(s.id)}
             onDragOver={(event) => event.preventDefault()}
             onDrop={() => {
@@ -90,8 +104,31 @@ export function TabsRow({
             }}
             onDragEnd={() => onSetDragId(null)}
           >
-            <span className="max-w-[140px] truncate max-sm:hidden">{s.name}</span>
-            <span className="max-w-[90px] truncate sm:hidden">{compactSessionName(s.name)}</span>
+            {renamingId === s.id ? (
+              <input
+                className="h-5 w-[120px] rounded-md border border-[var(--app-border)] bg-[var(--app-surface)] px-2 text-[10px] text-[var(--app-text)] outline-none sm:w-[160px] sm:text-xs"
+                value={renamingValue}
+                autoFocus
+                onClick={(event) => event.stopPropagation()}
+                onChange={(event) => onRenameChange(event.target.value)}
+                onBlur={onRenameSubmit}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    onRenameSubmit();
+                  }
+                  if (event.key === "Escape") {
+                    event.preventDefault();
+                    onRenameCancel();
+                  }
+                }}
+              />
+            ) : (
+              <>
+                <span className="max-w-[140px] truncate max-sm:hidden">{s.name}</span>
+                <span className="max-w-[90px] truncate sm:hidden">{compactSessionName(s.name)}</span>
+              </>
+            )}
             <span
               className={cn(
                 "h-1.5 w-1.5 rounded-full",
@@ -126,10 +163,13 @@ export function TabsRow({
       <Button
         variant="secondary"
         size="sm"
-        className="h-7 w-7 shrink-0 p-0"
+        className={cn(
+          "h-7 w-7 shrink-0 p-0",
+          !canCreateSession && "cursor-not-allowed opacity-50",
+        )}
         onClick={onCreateSession}
         aria-label="New terminal"
-        disabled={!canCreateSession}
+        aria-disabled={!canCreateSession}
       >
         <Plus className="h-4 w-4" />
       </Button>

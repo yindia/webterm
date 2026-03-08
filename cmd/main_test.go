@@ -163,3 +163,17 @@ func TestVersionCommand(t *testing.T) {
 		t.Fatalf("version failed: %v", err)
 	}
 }
+
+func TestCompletionCommandOutputs(t *testing.T) {
+	root := NewRootCommand()
+	buf := &bytes.Buffer{}
+	root.SetOut(buf)
+	root.SetErr(buf)
+	root.SetArgs([]string{"completion", "bash"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("completion failed: %v", err)
+	}
+	if buf.Len() == 0 {
+		t.Fatalf("expected completion output")
+	}
+}

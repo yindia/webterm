@@ -192,11 +192,11 @@ func TestManagerErrorPaths(t *testing.T) {
 	}
 }
 
-func TestNewRejectsInvalidSnapshotKey(t *testing.T) {
+func TestNewAcceptsSnapshotKeyString(t *testing.T) {
 	cfg := config.Default()
 	cfg.Sessions.SnapshotKey = "not-base64"
-	if _, err := New(cfg); err == nil {
-		t.Fatalf("expected error for invalid snapshot key")
+	if _, err := New(cfg); err != nil {
+		t.Fatalf("expected snapshot key to be accepted: %v", err)
 	}
 }
 

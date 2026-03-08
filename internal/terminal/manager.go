@@ -5,6 +5,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -96,7 +97,6 @@ func New(cfg config.Config) (*Manager, error) {
 		idleTimeout:      cfg.Sessions.IdleTimeout,
 		shell:            cfg.Terminal.Shell,
 		workingDir:       workingDir,
-		env:              cfg.Terminal.Env,
 		user:             cfg.Terminal.User,
 		group:            cfg.Terminal.Group,
 		sessions:         map[string]*Session{},
@@ -106,14 +106,13 @@ func New(cfg config.Config) (*Manager, error) {
 	}
 
 	if strings.TrimSpace(cfg.Sessions.SnapshotKey) != "" {
-		key, err := base64.StdEncoding.DecodeString(cfg.Sessions.SnapshotKey)
-		if err != nil {
-			return nil, err
+		rawKey := strings.TrimSpace(cfg.Sessions.SnapshotKey)
+		if decoded, err := base64.StdEncoding.DecodeString(rawKey); err == nil && len(decoded) == 32 {
+			m.snapshotKey = decoded
+		} else {
+			sum := sha256.Sum256([]byte(rawKey))
+			m.snapshotKey = sum[:]
 		}
-		if len(key) != 32 {
-			return nil, errors.New("snapshot_key must be 32 bytes base64")
-		}
-		m.snapshotKey = key
 	}
 
 	if m.snapshotInterval <= 0 {
@@ -156,7 +155,7 @@ func (m *Manager) createWithID(id string, name string, cols uint16, rows uint16,
 		name = "Terminal"
 	}
 
-	ptmx, cmd, err := startWithFallbackShells(m.shell, m.workingDir, m.env, cols, rows, m.user, m.group)
+	ptmx, cmd, err := startWithFallbackShells(m.shell, m.workingDir, nil, cols, rows, m.user, m.group)
 	if err != nil {
 		return nil, err
 	}
@@ -189,6 +188,21 @@ func (m *Manager) Get(id string) (*Session, bool) {
 	defer m.mu.RUnlock()
 	s, ok := m.sessions[id]
 	return s, ok
+}
+
+func (m *Manager) Rename(id string, name string) (*Session, error) {
+	clean := strings.TrimSpace(name)
+	if clean == "" {
+		return nil, errors.New("name required")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s, ok := m.sessions[id]
+	if !ok {
+		return nil, errors.New("session not found")
+	}
+	s.Name = clean
+	return s, nil
 }
 
 func (m *Manager) List() []*Session {
