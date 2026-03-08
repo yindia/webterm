@@ -3,7 +3,7 @@ server:
     port: 8080
 auth:
     mode: password
-    password: change-me
+    password: root
     session_ttl: 24h0m0s
     csrf_secret: change-this-secret
     rate_limit_max: 10

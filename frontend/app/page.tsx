@@ -14,7 +14,7 @@ import { TabsRow } from "@/components/terminal/TabsRow";
 import { TabActionsSheet } from "@/components/terminal/TabActionsSheet";
 import { TerminalStack } from "@/components/terminal/TerminalStack";
 import { ToastStack, ToastItem } from "@/components/terminal/ToastStack";
-import { MetricsSnapshot, SessionInfo } from "@/components/terminal/types";
+import { LayoutNode, LayoutPaneNode, MetricsSnapshot, SessionInfo } from "@/components/terminal/types";
 
 import type { Terminal } from "xterm";
 import type { FitAddon } from "xterm-addon-fit";
@@ -75,6 +75,36 @@ function sseUrl(sessionId: string, csrf: string): string {
 	return `${window.location.origin}/api/terminal/stream/${sessionId}?csrf=${encodeURIComponent(csrf)}`;
 }
 
+interface PaneInfo {
+  id: string;
+  sessionId: string;
+}
+
+type TerminalLayoutNode = LayoutNode;
+type TerminalPaneNode = LayoutPaneNode;
+
+function createPaneNode(sessionId: string, id?: string): TerminalPaneNode {
+  return {
+    type: "pane",
+    id: id ?? `pane-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    sessionId,
+  };
+}
+
+function flattenLayout(layout: TerminalLayoutNode | null | undefined): PaneInfo[] {
+  if (!layout) return [];
+  return [{ id: layout.id, sessionId: layout.sessionId }];
+}
+
+function findPaneById(layout: TerminalLayoutNode, paneId: string): TerminalPaneNode | null {
+  return layout.id === paneId ? layout : null;
+}
+
+function getFirstPaneId(layout: TerminalLayoutNode): string {
+  return layout.id;
+}
+
+
 /* ------------------------------------------------------------------ */
 /*  Component                                                          */
 /* ------------------------------------------------------------------ */
@@ -109,6 +139,8 @@ export default function Page() {
   const [quickSwitchOpen, setQuickSwitchOpen] = useState(false);
   const [quickQuery, setQuickQuery] = useState("");
   const [idleTimeoutSec, setIdleTimeoutSec] = useState(0);
+  const [layoutBySession, setLayoutBySession] = useState<Record<string, TerminalLayoutNode>>({});
+  const [activePaneBySession, setActivePaneBySession] = useState<Record<string, string>>({});
 
   /* ---- refs ---- */
   const csrfRef = useRef("");
@@ -120,11 +152,39 @@ export default function Page() {
   const mountedRef = useRef(true);
   const lastActivityRef = useRef<Map<string, number>>(new Map());
   const idleWarnedRef = useRef<Set<string>>(new Set());
+  const paneRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+  const activePaneIdRef = useRef<string | null>(null);
+  const activeSessionIdRef = useRef<string | null>(null);
+
+  const activeLayout = useMemo(
+    () => (activeId ? layoutBySession[activeId] ?? null : null),
+    [activeId, layoutBySession],
+  );
+  const activePanes = useMemo(() => flattenLayout(activeLayout), [activeLayout]);
+  const activePaneId = useMemo(() => {
+    if (!activeId || !activeLayout) return null;
+    const preferred = activePaneBySession[activeId];
+    if (preferred && findPaneById(activeLayout, preferred)) return preferred;
+    return getFirstPaneId(activeLayout);
+  }, [activeId, activeLayout, activePaneBySession]);
+  const activePaneSessionId = useMemo(() => {
+    if (!activeLayout || !activePaneId) return null;
+    const pane = findPaneById(activeLayout, activePaneId);
+    return pane ? pane.sessionId : null;
+  }, [activeLayout, activePaneId]);
 
   /* keep activeIdRef in sync */
   useEffect(() => {
     activeIdRef.current = activeId;
   }, [activeId]);
+
+  useEffect(() => {
+    activePaneIdRef.current = activePaneId;
+  }, [activePaneId]);
+
+  useEffect(() => {
+    activeSessionIdRef.current = activePaneSessionId;
+  }, [activePaneSessionId]);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -317,7 +377,7 @@ export default function Page() {
   /* ---------------------------------------------------------------- */
 
   const fitActive = useCallback(() => {
-    const id = activeIdRef.current;
+    const id = activeSessionIdRef.current;
     if (!id) return;
     const st = terminalsRef.current.get(id);
     if (!st) return;
@@ -336,35 +396,9 @@ export default function Page() {
     });
   }, [fitActive, safeTimeout]);
 
-  const switchToSession = useCallback(
-    (id: string) => {
-      const map = terminalsRef.current;
-      /* hide all */
-      map.forEach((st, sid) => {
-        if (sid === id) {
-          st.container.style.zIndex = "1";
-          st.container.style.visibility = "visible";
-        } else {
-          st.container.style.zIndex = "0";
-          st.container.style.visibility = "hidden";
-        }
-      });
-      setActiveId(id);
-      const st = map.get(id);
-      if (st) {
-        setConnected(st.eventSource.readyState !== EventSource.CLOSED);
-        requestAnimationFrame(() => {
-          try {
-            st.fitAddon.fit();
-          } catch {
-            /* ignore */
-          }
-          st.terminal.focus();
-        });
-      }
-    },
-    [],
-  );
+  const switchToSession = useCallback((id: string) => {
+    setActiveId(id);
+  }, []);
 
   const dropSessionLocal = useCallback(
     (id: string) => {
@@ -391,6 +425,18 @@ export default function Page() {
             setConnected(false);
           }
         }
+        return next;
+      });
+      setLayoutBySession((prev) => {
+        if (!(id in prev)) return prev;
+        const next = { ...prev };
+        delete next[id];
+        return next;
+      });
+      setActivePaneBySession((prev) => {
+        if (!(id in prev)) return prev;
+        const next = { ...prev };
+        delete next[id];
         return next;
       });
     },
@@ -423,7 +469,7 @@ export default function Page() {
       terminal.open(container);
 
       const observer = new ResizeObserver(() => {
-        if (activeIdRef.current === session.id) {
+        if (activeSessionIdRef.current === session.id) {
           requestAnimationFrame(() => {
             try {
               fitAddon.fit();
@@ -437,7 +483,7 @@ export default function Page() {
 
       const csrf = getCSRFToken();
       const eventSource = new EventSource(sseUrl(session.id, csrf), { withCredentials: true });
-      if (!activeIdRef.current || activeIdRef.current === session.id) {
+      if (!activeSessionIdRef.current || activeSessionIdRef.current === session.id) {
         setConnected(eventSource.readyState !== EventSource.CLOSED);
       }
 
@@ -513,7 +559,7 @@ export default function Page() {
       });
 
       eventSource.addEventListener("open", () => {
-        if (activeIdRef.current === session.id && mountedRef.current) {
+        if (activeSessionIdRef.current === session.id && mountedRef.current) {
           setConnected(true);
         }
       });
@@ -526,7 +572,7 @@ export default function Page() {
       }, 800);
 
       eventSource.addEventListener("error", () => {
-        if (activeIdRef.current === session.id && mountedRef.current) {
+        if (activeSessionIdRef.current === session.id && mountedRef.current) {
           setConnected(false);
         }
       });
@@ -553,6 +599,7 @@ export default function Page() {
       terminalsRef.current.set(session.id, st);
       markActivity(session.id);
       setSessions((prev) => (prev.some((s) => s.id === session.id) ? prev : [...prev, session]));
+
       switchToSession(session.id);
 
       try {
@@ -561,18 +608,31 @@ export default function Page() {
         void err;
       }
     },
-    [getCSRFToken, loadXterm, postInput, postResize, switchToSession, theme, fontSize, cursorStyle],
+    [
+      getCSRFToken,
+      loadXterm,
+      postInput,
+      postResize,
+      switchToSession,
+      theme,
+      fontSize,
+      cursorStyle,
+      markActivity,
+    ],
   );
 
   const createSession = useCallback(
     async (name?: string) => {
-      if (sessions.length >= MAX_SESSIONS) return;
-      const parent = containerParentRef.current;
-      if (!parent) return;
+      const visibleCount = sessions.length;
+      if (visibleCount >= MAX_SESSIONS) return;
+    const parent = activePaneIdRef.current
+      ? paneRefs.current.get(activePaneIdRef.current) ?? containerParentRef.current
+      : containerParentRef.current;
+    if (!parent) return;
 
       const cols = Math.max(Math.floor(parent.clientWidth / 8), 80);
       const rows = Math.max(Math.floor(parent.clientHeight / 17), 24);
-      const sessionName = name ?? `Terminal ${sessions.length + 1}`;
+      const sessionName = name ?? `Terminal ${visibleCount + 1}`;
 
       let res: Response;
       try {
@@ -599,7 +659,7 @@ export default function Page() {
       const session: SessionInfo = { id: data.id, name: data.name ?? sessionName };
       await attachSession(session);
     },
-    [attachSession, sessions.length],
+    [attachSession, sessions],
   );
 
   const closeSession = useCallback(
@@ -614,12 +674,12 @@ export default function Page() {
       } catch (err) {
         void err;
       }
-  },
-  [dropSessionLocal],
+    },
+    [dropSessionLocal],
   );
 
   const handleCopy = useCallback(async () => {
-    const id = activeIdRef.current;
+    const id = activeSessionIdRef.current;
     if (!id) {
       pushToast("No active tab", "error");
       return;
@@ -643,7 +703,7 @@ export default function Page() {
   }, [pushToast]);
 
   const handlePaste = useCallback(async () => {
-    const id = activeIdRef.current;
+    const id = activeSessionIdRef.current;
     if (!id) {
       pushToast("No active tab", "error");
       return;
@@ -837,11 +897,77 @@ export default function Page() {
   }, [authenticated, metricsPage]);
 
   useEffect(() => {
+    if (!activeId) return;
+    if (!layoutBySession[activeId]) {
+      const pane = createPaneNode(activeId, `pane-${Date.now()}`);
+      setLayoutBySession((prev) => ({ ...prev, [activeId]: pane }));
+      setActivePaneBySession((prev) => ({ ...prev, [activeId]: pane.id }));
+      return;
+    }
+    if (!activePaneBySession[activeId]) {
+      const firstPaneId = getFirstPaneId(layoutBySession[activeId]);
+      setActivePaneBySession((prev) => ({ ...prev, [activeId]: firstPaneId }));
+    }
+  }, [activeId, layoutBySession, activePaneBySession]);
+
+  useEffect(() => {
+    if (!activePaneSessionId) {
+      setConnected(false);
+      return;
+    }
+    const st = terminalsRef.current.get(activePaneSessionId);
+    if (!st) return;
+    setConnected(st.eventSource.readyState !== EventSource.CLOSED);
+    requestAnimationFrame(() => {
+      try {
+        st.fitAddon.fit();
+      } catch {
+        /* ignore */
+      }
+      st.terminal.focus();
+    });
+  }, [activePaneSessionId]);
+
+  useEffect(() => {
+    if (!activeId) return;
+    const panes = activePanes;
+    panes.forEach((pane) => {
+      const st = terminalsRef.current.get(pane.sessionId);
+      const host = paneRefs.current.get(pane.id);
+      if (!st || !host) return;
+      if (st.container.parentNode !== host) {
+        host.appendChild(st.container);
+      }
+      st.container.style.visibility = "visible";
+      st.container.style.zIndex = "1";
+    });
+    terminalsRef.current.forEach((st, id) => {
+      if (!panes.some((p) => p.sessionId === id)) {
+        st.container.style.visibility = "hidden";
+        if (containerParentRef.current && st.container.parentNode !== containerParentRef.current) {
+          containerParentRef.current.appendChild(st.container);
+        }
+      }
+    });
+    requestAnimationFrame(() => {
+      panes.forEach((pane) => {
+        const st = terminalsRef.current.get(pane.sessionId);
+        if (!st) return;
+        try {
+          st.fitAddon.fit();
+        } catch {
+          /* ignore */
+        }
+      });
+    });
+  }, [activeId, activePanes]);
+
+  useEffect(() => {
     if (!authenticated) return;
     if (idleTimeoutSec <= 0) return;
     const warnAtMs = Math.max(0, idleTimeoutSec * 1000 - 5 * 60 * 1000);
     const id = window.setInterval(() => {
-      const activeId = activeIdRef.current;
+      const activeId = activeSessionIdRef.current;
       if (!activeId) return;
       const last = lastActivityRef.current.get(activeId);
       if (!last) return;
@@ -911,7 +1037,7 @@ export default function Page() {
   useEffect(() => {
     const handleVisibility = () => {
       if (document.visibilityState === "visible") {
-        const id = activeIdRef.current;
+        const id = activeSessionIdRef.current;
         if (!id) return;
         const st = terminalsRef.current.get(id);
         if (!st) return;
@@ -970,7 +1096,6 @@ export default function Page() {
 
   const activeSession = sessions.find((s) => s.id === activeId);
   const showConnected = connected && serverAlive;
-  const canCreateSession = sessions.length < MAX_SESSIONS;
   const activeForActions = sessions.find((s) => s.id === tabActionsId) ?? null;
   const orderedSessions = useMemo(() => sessions, [sessions]);
   const visibleSessions = useMemo(() => {
@@ -979,6 +1104,7 @@ export default function Page() {
     }
     return orderedSessions;
   }, [detachedSessionId, isDetached, orderedSessions]);
+  const canCreateSession = visibleSessions.length < MAX_SESSIONS;
 
   /* keyboard shortcuts */
   useEffect(() => {
@@ -1010,21 +1136,21 @@ export default function Page() {
 
       if (e.code === "ArrowLeft" || e.code === "ArrowRight") {
         e.preventDefault();
-        if (sessions.length < 2) return;
-        const idx = sessions.findIndex((s) => s.id === activeIdRef.current);
+        if (visibleSessions.length < 2) return;
+        const idx = visibleSessions.findIndex((s) => s.id === activeIdRef.current);
         if (idx === -1) return;
         const next =
           e.code === "ArrowLeft"
-            ? (idx - 1 + sessions.length) % sessions.length
-            : (idx + 1) % sessions.length;
-        switchToSession(sessions[next].id);
+            ? (idx - 1 + visibleSessions.length) % visibleSessions.length
+            : (idx + 1) % visibleSessions.length;
+        switchToSession(visibleSessions[next].id);
       }
     };
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sessions, createSession, switchToSession, toggleFullscreen, canCreateSession, pushToast]);
+  }, [visibleSessions, createSession, switchToSession, toggleFullscreen, canCreateSession, pushToast]);
 
   /* ================================================================ */
   /*  LOGIN SCREEN                                                     */
@@ -1084,7 +1210,9 @@ export default function Page() {
             createSession();
           }}
           onToggleFullscreen={toggleFullscreen}
-          onSwitchSession={switchToSession}
+          onSwitchSession={(id) => {
+            switchToSession(id);
+          }}
           onDetachSession={(id) => {
             dropSessionLocal(id);
             openDetached(id);
@@ -1127,8 +1255,33 @@ export default function Page() {
         />
         {/* ---- terminal area ---- */}
         <TerminalStack
-          sessions={sessions}
+          layout={activeLayout}
+          activePaneId={activePaneId}
           isFullscreen={isFullscreen}
+          onActivatePane={(id) => {
+            if (!activeId) return;
+            setActivePaneBySession((prev) => ({ ...prev, [activeId]: id }));
+            if (!activeLayout) return;
+            const pane = findPaneById(activeLayout, id);
+            if (!pane) return;
+            const st = terminalsRef.current.get(pane.sessionId);
+            if (!st) return;
+            requestAnimationFrame(() => {
+              try {
+                st.fitAddon.fit();
+              } catch {
+                /* ignore */
+              }
+              st.terminal.focus();
+            });
+          }}
+          registerPaneRef={(id, node) => {
+            if (node) {
+              paneRefs.current.set(id, node);
+            } else {
+              paneRefs.current.delete(id);
+            }
+          }}
           containerParentRef={containerParentRef}
         />
       </div>
@@ -1145,11 +1298,9 @@ export default function Page() {
         fontSize={fontSize}
         cursorStyle={cursorStyle}
         cursorStyles={CURSOR_STYLES}
-        theme={theme}
         onClose={() => setSettingsOpen(false)}
         onFontSizeChange={setFontSize}
         onCursorStyleChange={(value) => setCursorStyle(value as (typeof CURSOR_STYLES)[number])}
-        onThemeChange={setTheme}
       />
 
       <MetricsModal

@@ -45,3 +45,11 @@ export interface MetricsSnapshot {
     note: string;
   };
 }
+
+export type LayoutNode = LayoutPaneNode;
+
+export interface LayoutPaneNode {
+  type: "pane";
+  id: string;
+  sessionId: string;
+}

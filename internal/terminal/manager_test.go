@@ -15,6 +15,7 @@ func TestCreateWriteReadClose(t *testing.T) {
 	}
 
 	cfg := config.Default()
+	cfg.Sessions.SnapshotDir = t.TempDir()
 	cfg.Sessions.MaxSessions = 2
 	cfg.Terminal.Shell = "/bin/bash"
 

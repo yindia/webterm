@@ -2,18 +2,14 @@
 
 import { Settings, X } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
-
 interface SettingsModalProps {
   open: boolean;
   fontSize: number;
   cursorStyle: string;
   cursorStyles: readonly string[];
-  theme: "dark" | "light";
   onClose: () => void;
   onFontSizeChange: (value: number) => void;
   onCursorStyleChange: (value: string) => void;
-  onThemeChange: (value: "dark" | "light") => void;
 }
 
 export function SettingsModal({
@@ -21,11 +17,9 @@ export function SettingsModal({
   fontSize,
   cursorStyle,
   cursorStyles,
-  theme,
   onClose,
   onFontSizeChange,
   onCursorStyleChange,
-  onThemeChange,
 }: SettingsModalProps) {
   if (!open) return null;
 
@@ -82,27 +76,6 @@ export function SettingsModal({
             </select>
           </div>
 
-          <div>
-            <label className="mb-1 block text-xs uppercase tracking-[0.2em] text-[var(--app-text-muted)]">
-              Theme
-            </label>
-            <div className="flex gap-2">
-              <Button
-                variant={theme === "dark" ? "secondary" : "ghost"}
-                className="flex-1"
-                onClick={() => onThemeChange("dark")}
-              >
-                Dark
-              </Button>
-              <Button
-                variant={theme === "light" ? "secondary" : "ghost"}
-                className="flex-1"
-                onClick={() => onThemeChange("light")}
-              >
-                Light
-              </Button>
-            </div>
-          </div>
         </div>
       </div>
     </div>
