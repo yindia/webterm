@@ -2,6 +2,10 @@
 
 Self-hosted browser terminal with multi-session tabs, modern UI, and cross-platform metrics.
 
+## Demo
+
+<video src="demo.mov" controls muted playsinline style="max-width: 100%;"></video>
+
 ## Features
 
 - Multiple terminal sessions with tabs, detach, and keyboard shortcuts

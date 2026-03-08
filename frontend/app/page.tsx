@@ -349,10 +349,10 @@ export default function Page() {
           st.container.style.visibility = "hidden";
         }
       });
-		setActiveId(id);
-		const st = map.get(id);
-		if (st) {
-			setConnected(st.eventSource.readyState === EventSource.OPEN);
+      setActiveId(id);
+      const st = map.get(id);
+      if (st) {
+        setConnected(st.eventSource.readyState !== EventSource.CLOSED);
         requestAnimationFrame(() => {
           try {
             st.fitAddon.fit();
@@ -437,6 +437,9 @@ export default function Page() {
 
       const csrf = getCSRFToken();
       const eventSource = new EventSource(sseUrl(session.id, csrf), { withCredentials: true });
+      if (!activeIdRef.current || activeIdRef.current === session.id) {
+        setConnected(eventSource.readyState !== EventSource.CLOSED);
+      }
 
       const st: SessionTerminal = {
         terminal,
