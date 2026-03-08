@@ -25,11 +25,11 @@ jobs:
         run: go mod download
       - name: Go test
         run: go test ./...
-      - name: Go build
-        run: go build -tags embedout ./...
       - name: Frontend install
         run: npm ci
         working-directory: frontend
       - name: Frontend build
         run: npm run build
         working-directory: frontend
+      - name: Go build
+        run: go build -tags embedout ./...
