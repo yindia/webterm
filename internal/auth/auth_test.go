@@ -89,6 +89,7 @@ func TestSessionExpires(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Authenticate failed: %v", err)
 	}
+	time.Sleep(2 * time.Millisecond)
 	if _, ok := mgr.GetSession(s.ID); ok {
 		t.Fatalf("expected session to expire")
 	}

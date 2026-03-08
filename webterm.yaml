@@ -11,7 +11,6 @@ auth:
 terminal:
     shell: /bin/zsh
     working_dir: "~/workspace"
-    env: []
     user: ""
     group: ""
 policy:

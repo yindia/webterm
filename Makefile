@@ -24,7 +24,7 @@ frontend-build: deps
 	npm --prefix frontend run build
 
 build: frontend-build
-	go build -o $(BINARY) .
+	go build -tags embedout -o $(BINARY) .
 
 test:
 	go test ./...

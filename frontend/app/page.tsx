@@ -691,7 +691,7 @@ export default function Page() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({ password, token: password }),
+		body: JSON.stringify({ password }),
       });
       if (res.ok) {
         const data: { csrf_token?: string } = await res.json();

@@ -11,6 +11,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -158,9 +159,14 @@ func Run(ctx context.Context, cfg config.Config) error {
 	mux.Handle("/api/terminal/input/", application.withAuth(application.withCSRF(http.HandlerFunc(application.terminalInputHandler))))
 	mux.Handle("/api/terminal/resize/", application.withAuth(application.withCSRF(http.HandlerFunc(application.terminalResizeHandler))))
 
-	frontendFS, err := fs.Sub(frontend.Dist, "out")
+	frontendFS, err := fs.Sub(frontend.Dist, frontend.RootDir)
 	if err != nil {
 		return err
+	}
+	if frontend.RootDir == "embed" {
+		if info, statErr := os.Stat("frontend/out"); statErr == nil && info.IsDir() {
+			frontendFS = os.DirFS("frontend/out")
+		}
 	}
 	fileServer := http.FileServer(http.FS(frontendFS))
 	mux.Handle("/", spaFallback(fileServer, frontendFS))

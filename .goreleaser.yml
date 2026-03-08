@@ -5,6 +5,8 @@ builds:
   - id: webterm
     main: ./main.go
     binary: webterm
+    tags:
+      - embedout
     env:
       - CGO_ENABLED=0
     goos:
