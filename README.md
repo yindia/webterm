@@ -4,7 +4,8 @@ Self-hosted browser terminal with multi-session tabs, modern UI, and cross-platf
 
 ## Demo
 
-<video src="demo.mov" controls muted playsinline style="max-width: 100%;"></video>
+<video src="https://github.com/user-attachments/assets/a469a892-5002-4e46-923f-ece89f1a46e3" controls muted playsinline style="max-width: 100%;"></video>
+
 
 ## Features
 
