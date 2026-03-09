@@ -63,12 +63,27 @@ function getCookie(name: string): string {
 }
 
 function decodeBase64ToBytes(data: string): Uint8Array {
-  const raw = atob(data);
-  const bytes = new Uint8Array(raw.length);
-  for (let i = 0; i < raw.length; i += 1) {
-    bytes[i] = raw.charCodeAt(i);
-  }
-  return bytes;
+	if (!data) return new Uint8Array();
+	const chunkSize = 16384;
+	const chunks: Uint8Array[] = [];
+	let total = 0;
+	for (let i = 0; i < data.length; i += chunkSize) {
+		const slice = data.slice(i, i + chunkSize);
+		const raw = atob(slice);
+		const bytes = new Uint8Array(raw.length);
+		for (let j = 0; j < raw.length; j += 1) {
+			bytes[j] = raw.charCodeAt(j);
+		}
+		chunks.push(bytes);
+		total += bytes.length;
+	}
+	const out = new Uint8Array(total);
+	let offset = 0;
+	for (const chunk of chunks) {
+		out.set(chunk, offset);
+		offset += chunk.length;
+	}
+	return out;
 }
 
 function wsUrl(sessionId: string, csrf: string, cols: number, rows: number): string {
@@ -379,6 +394,26 @@ export default function Page() {
 		[postResize],
 	);
 
+	const syncTerminalSize = useCallback(
+		(id: string) => {
+			const st = terminalsRef.current.get(id);
+			if (!st) return;
+			const dims = st.fitAddon.proposeDimensions?.();
+			if (!dims || dims.cols <= 0 || dims.rows <= 0) {
+				scheduleFit(id, true);
+				return;
+			}
+			try {
+				st.terminal.resize(dims.cols, dims.rows);
+			} catch {
+				/* ignore */
+			}
+			void postResize(id, dims.cols, dims.rows);
+			st.terminal.focus();
+		},
+		[postResize, scheduleFit],
+	);
+
   const moveSession = useCallback((sourceId: string, targetId: string) => {
     if (sourceId === targetId) return;
     setSessions((prev) => {
@@ -502,6 +537,12 @@ export default function Page() {
       parent.appendChild(container);
 
 		terminal.open(container);
+		terminal.attachCustomKeyEventHandler((event) => {
+			if (event.key === "Tab") {
+				event.preventDefault();
+			}
+			return true;
+		});
 		try {
 			fitAddon.fit();
 		} catch {
@@ -516,14 +557,17 @@ export default function Page() {
       });
 
 		const csrf = getCSRFToken();
-		const ws = new WebSocket(
-			wsUrl(
-				session.id,
-				csrf,
-				Math.max(2, terminal.cols ?? 80),
-				Math.max(1, terminal.rows ?? 24),
-			),
-		);
+		const proposed = fitAddon.proposeDimensions?.();
+		const initialCols = Math.max(2, proposed?.cols ?? terminal.cols ?? 80);
+		const initialRows = Math.max(1, proposed?.rows ?? terminal.rows ?? 24);
+		if (proposed) {
+			try {
+				terminal.resize(initialCols, initialRows);
+			} catch {
+				/* ignore */
+			}
+		}
+		const ws = new WebSocket(wsUrl(session.id, csrf, initialCols, initialRows));
 		ws.binaryType = "arraybuffer";
 		if (!activeSessionIdRef.current || activeSessionIdRef.current === session.id) {
 			setConnected(ws.readyState === WebSocket.OPEN);
@@ -539,10 +583,10 @@ export default function Page() {
 			canResize: false,
 		};
 		terminalsRef.current.set(session.id, st);
-		requestAnimationFrame(() => scheduleFit(session.id, true));
-		window.setTimeout(() => scheduleFit(session.id, true), 200);
+		requestAnimationFrame(() => syncTerminalSize(session.id));
+		window.setTimeout(() => syncTerminalSize(session.id), 200);
 		if (document.fonts?.ready) {
-			document.fonts.ready.then(() => scheduleFit(session.id, true)).catch(() => {
+			document.fonts.ready.then(() => syncTerminalSize(session.id)).catch(() => {
 				return;
 			});
 		}
@@ -602,11 +646,11 @@ export default function Page() {
 			}
 			const bytes = decodeBase64ToBytes(snapshotData);
 			handleStream(bytes, () => {
-				st.replaying = false;
-				st.canResize = true;
-				flushQueue();
-				scheduleFit(session.id);
-			});
+		st.replaying = false;
+		st.canResize = true;
+		flushQueue();
+		syncTerminalSize(session.id);
+		});
 		};
 
 		let didForceFit = false;
@@ -630,20 +674,20 @@ export default function Page() {
 				st.queue.push(bytes);
 				return;
 			}
-			if (!didForceFit) {
-				didForceFit = true;
-				scheduleFit(session.id, true);
-				window.setTimeout(() => scheduleFit(session.id, true), 120);
-			}
-			handleStream(bytes);
+		if (!didForceFit) {
+			didForceFit = true;
+			syncTerminalSize(session.id);
+			window.setTimeout(() => syncTerminalSize(session.id), 120);
+		}
+		handleStream(bytes);
 		});
 
 		ws.addEventListener("open", () => {
 			if (activeSessionIdRef.current === session.id && mountedRef.current) {
 				setConnected(true);
 			}
-			scheduleFit(session.id, true);
-			window.setTimeout(() => scheduleFit(session.id, true), 160);
+		syncTerminalSize(session.id);
+		window.setTimeout(() => syncTerminalSize(session.id), 160);
 		});
 
 		safeTimeout(() => {

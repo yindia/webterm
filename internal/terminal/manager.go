@@ -394,19 +394,7 @@ func (m *Manager) CloseAll() {
 	m.mu.Unlock()
 
 	for _, s := range all {
-		if s.TmuxSession != "" && m.tmux != nil {
-			_, _ = m.tmux.Command("kill-session", "-t", s.TmuxSession)
-		}
 		_ = s.close()
-	}
-	if m.tmux != nil {
-		if sessions, err := m.tmux.ListSessions(); err == nil {
-			for _, sess := range sessions {
-				if strings.HasPrefix(sess.Name, "webterm-") {
-					_, _ = m.tmux.Command("kill-session", "-t", sess.Name)
-				}
-			}
-		}
 	}
 	if m.tmuxDir != "" {
 		_ = os.RemoveAll(m.tmuxDir)
