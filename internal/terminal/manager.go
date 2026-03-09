@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -22,6 +23,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/GianlucaP106/gotmux/gotmux"
 	"github.com/creack/pty"
 
 	"webterm/internal/config"
@@ -35,9 +37,13 @@ type Session struct {
 	LastCols     uint16
 	LastRows     uint16
 	LastSnapshot time.Time
+	TmuxSession  string
+	TmuxPane     string
+	PipePath     string
 
 	ptmx   *os.File
 	cmd    *exec.Cmd
+	pipe   *os.File
 	closed bool
 	buffer []byte
 	mu     sync.Mutex
@@ -70,6 +76,9 @@ type Manager struct {
 	snapshotInterval time.Duration
 	snapshotCh       chan snapshotRecord
 	snapshotKey      []byte
+	tmux             *gotmux.Tmux
+	useTmux          bool
+	tmuxDir          string
 
 	mu       sync.RWMutex
 	sessions map[string]*Session
@@ -105,6 +114,15 @@ func New(cfg config.Config) (*Manager, error) {
 		snapshotKey:      nil,
 	}
 
+	if tmuxClient, err := gotmux.DefaultTmux(); err == nil {
+		tmuxDir, dirErr := os.MkdirTemp("", "webterm-tmux-")
+		if dirErr == nil {
+			m.tmux = tmuxClient
+			m.useTmux = true
+			m.tmuxDir = tmuxDir
+		}
+	}
+
 	if strings.TrimSpace(cfg.Sessions.SnapshotKey) != "" {
 		rawKey := strings.TrimSpace(cfg.Sessions.SnapshotKey)
 		if decoded, err := base64.StdEncoding.DecodeString(rawKey); err == nil && len(decoded) == 32 {
@@ -118,13 +136,23 @@ func New(cfg config.Config) (*Manager, error) {
 	if m.snapshotInterval <= 0 {
 		m.snapshotInterval = 5 * time.Second
 	}
+	if m.useTmux {
+		m.snapshotDir = ""
+	}
 	if m.snapshotDir != "" {
-		if err := os.MkdirAll(m.snapshotDir, 0o755); err != nil {
-			return nil, err
+		if m.snapshotDir != "" {
+			if err := os.MkdirAll(m.snapshotDir, 0o755); err != nil {
+				return nil, err
+			}
 		}
 		m.snapshotCh = make(chan snapshotRecord, 32)
 		go m.snapshotWorker()
-		m.restoreSnapshots()
+		if !m.useTmux {
+			m.restoreSnapshots()
+		}
+	}
+	if m.useTmux {
+		m.restoreTmuxSessions()
 	}
 
 	go m.sweepIdleSessions(context.Background())
@@ -155,6 +183,10 @@ func (m *Manager) createWithID(id string, name string, cols uint16, rows uint16,
 		name = "Terminal"
 	}
 
+	if m.useTmux && m.tmux != nil {
+		return m.createTmuxSession(id, name, cols, rows, buffer)
+	}
+
 	ptmx, cmd, err := startWithFallbackShells(m.shell, m.workingDir, nil, cols, rows, m.user, m.group)
 	if err != nil {
 		return nil, err
@@ -171,6 +203,76 @@ func (m *Manager) createWithID(id string, name string, cols uint16, rows uint16,
 		LastSnapshot: now,
 		ptmx:         ptmx,
 		cmd:          cmd,
+	}
+	if len(buffer) > 0 {
+		if len(buffer) > maxSessionBuffer {
+			buffer = buffer[len(buffer)-maxSessionBuffer:]
+		}
+		s.buffer = append([]byte{}, buffer...)
+	}
+
+	m.sessions[id] = s
+	return s, nil
+}
+
+func (m *Manager) createTmuxSession(id string, name string, cols uint16, rows uint16, buffer []byte) (*Session, error) {
+	if m.tmux == nil {
+		return nil, errors.New("tmux client not available")
+	}
+
+	tmuxName := "webterm-" + id
+	options := &gotmux.SessionOptions{
+		Name:           tmuxName,
+		StartDirectory: m.workingDir,
+		Width:          int(cols),
+		Height:         int(rows),
+	}
+	if strings.TrimSpace(m.shell) != "" {
+		options.ShellCommand = m.shell
+	}
+
+	sess, err := m.tmux.NewSession(options)
+	if err != nil {
+		return nil, err
+	}
+	panes, err := sess.ListPanes()
+	if err != nil || len(panes) == 0 {
+		_ = sess.Kill()
+		return nil, errors.New("failed to get tmux pane")
+	}
+	pane := panes[0]
+	pipePath := filepath.Join(m.tmuxDir, id+".pipe")
+	if err := syscall.Mkfifo(pipePath, 0o600); err != nil {
+		_ = sess.Kill()
+		return nil, err
+	}
+	if _, err := m.tmux.Command("pipe-pane", "-t", pane.Id, fmt.Sprintf("cat > %s", pipePath)); err != nil {
+		_ = os.Remove(pipePath)
+		_ = sess.Kill()
+		return nil, err
+	}
+	pipeFile, err := os.OpenFile(pipePath, os.O_RDWR, 0o600)
+	if err != nil {
+		_, _ = m.tmux.Command("pipe-pane", "-t", pane.Id)
+		_ = os.Remove(pipePath)
+		_ = sess.Kill()
+		return nil, err
+	}
+	_, _ = m.tmux.Command("set-option", "-t", tmuxName, "@webterm_name", name)
+
+	now := time.Now().UTC()
+	s := &Session{
+		ID:           id,
+		Name:         name,
+		CreatedAt:    now,
+		LastActive:   now,
+		LastCols:     cols,
+		LastRows:     rows,
+		LastSnapshot: now,
+		TmuxSession:  tmuxName,
+		TmuxPane:     pane.Id,
+		PipePath:     pipePath,
+		pipe:         pipeFile,
 	}
 	if len(buffer) > 0 {
 		if len(buffer) > maxSessionBuffer {
@@ -202,10 +304,16 @@ func (m *Manager) Rename(id string, name string) (*Session, error) {
 		return nil, errors.New("session not found")
 	}
 	s.Name = clean
+	if s.TmuxSession != "" && m.tmux != nil {
+		_, _ = m.tmux.Command("set-option", "-t", s.TmuxSession, "@webterm_name", s.Name)
+	}
 	return s, nil
 }
 
 func (m *Manager) List() []*Session {
+	if m.useTmux {
+		m.syncTmuxSessions()
+	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	out := make([]*Session, 0, len(m.sessions))
@@ -213,6 +321,44 @@ func (m *Manager) List() []*Session {
 		out = append(out, s)
 	}
 	return out
+}
+
+func (m *Manager) syncTmuxSessions() {
+	if m.tmux == nil {
+		return
+	}
+	current, err := m.tmux.ListSessions()
+	if err != nil {
+		return
+	}
+	known := map[string]bool{}
+	for _, sess := range current {
+		if !strings.HasPrefix(sess.Name, "webterm-") {
+			continue
+		}
+		id := strings.TrimPrefix(sess.Name, "webterm-")
+		if id == "" {
+			continue
+		}
+		known[id] = true
+		m.mu.RLock()
+		_, exists := m.sessions[id]
+		m.mu.RUnlock()
+		if !exists {
+			m.restoreSingleTmuxSession(sess)
+		}
+	}
+	m.mu.Lock()
+	for id, s := range m.sessions {
+		if s.TmuxSession == "" {
+			continue
+		}
+		if !known[id] {
+			delete(m.sessions, id)
+			_ = s.close()
+		}
+	}
+	m.mu.Unlock()
 }
 
 func (m *Manager) Close(id string) error {
@@ -230,7 +376,11 @@ func (m *Manager) Close(id string) error {
 	if m.snapshotDir != "" {
 		_ = os.Remove(m.snapshotPath(id))
 	}
-
+	if s.TmuxSession != "" {
+		if m.tmux != nil {
+			_, _ = m.tmux.Command("kill-session", "-t", s.TmuxSession)
+		}
+	}
 	return s.close()
 }
 
@@ -244,7 +394,22 @@ func (m *Manager) CloseAll() {
 	m.mu.Unlock()
 
 	for _, s := range all {
+		if s.TmuxSession != "" && m.tmux != nil {
+			_, _ = m.tmux.Command("kill-session", "-t", s.TmuxSession)
+		}
 		_ = s.close()
+	}
+	if m.tmux != nil {
+		if sessions, err := m.tmux.ListSessions(); err == nil {
+			for _, sess := range sessions {
+				if strings.HasPrefix(sess.Name, "webterm-") {
+					_, _ = m.tmux.Command("kill-session", "-t", sess.Name)
+				}
+			}
+		}
+	}
+	if m.tmuxDir != "" {
+		_ = os.RemoveAll(m.tmuxDir)
 	}
 }
 
@@ -254,6 +419,12 @@ func (m *Manager) Write(id string, data []byte) (int, error) {
 		return 0, errors.New("session not found")
 	}
 	s.touch()
+	if s.TmuxSession != "" {
+		if _, err := m.tmux.Command("send-keys", "-t", s.TmuxPane, "-l", string(data)); err != nil {
+			return 0, err
+		}
+		return len(data), nil
+	}
 	return s.ptmx.Write(data)
 }
 
@@ -262,7 +433,16 @@ func (m *Manager) Read(id string, buf []byte) (int, error) {
 	if !ok {
 		return 0, io.EOF
 	}
-	n, err := s.ptmx.Read(buf)
+	var n int
+	var err error
+	if s.TmuxSession != "" {
+		if s.pipe == nil {
+			return 0, io.EOF
+		}
+		n, err = s.pipe.Read(buf)
+	} else {
+		n, err = s.ptmx.Read(buf)
+	}
 	if n > 0 {
 		s.touch()
 		m.appendOutput(s, buf[:n])
@@ -280,6 +460,30 @@ func (m *Manager) Resize(id string, cols uint16, rows uint16) error {
 	s.LastCols = cols
 	s.LastRows = rows
 	s.mu.Unlock()
+	if s.TmuxSession != "" {
+		_, err := m.tmux.Command(
+			"resize-window",
+			"-t",
+			s.TmuxSession,
+			"-x",
+			strconv.Itoa(int(cols)),
+			"-y",
+			strconv.Itoa(int(rows)),
+		)
+		if err != nil {
+			return err
+		}
+		_, err = m.tmux.Command(
+			"resize-pane",
+			"-t",
+			s.TmuxPane,
+			"-x",
+			strconv.Itoa(int(cols)),
+			"-y",
+			strconv.Itoa(int(rows)),
+		)
+		return err
+	}
 	return pty.Setsize(s.ptmx, &pty.Winsize{Cols: cols, Rows: rows})
 }
 
@@ -298,6 +502,38 @@ func (m *Manager) History(id string) ([]byte, error) {
 	return out, nil
 }
 
+func (m *Manager) Snapshot(id string) ([]byte, uint16, uint16, bool, error) {
+	s, ok := m.Get(id)
+	if !ok {
+		return nil, 0, 0, false, errors.New("session not found")
+	}
+	if s.TmuxSession == "" || m.tmux == nil {
+		return nil, 0, 0, false, nil
+	}
+	output, err := m.tmux.Command(
+		"capture-pane",
+		"-t",
+		s.TmuxPane,
+		"-p",
+		"-e",
+		"-J",
+		"-S",
+		"-",
+	)
+	if err != nil {
+		return nil, 0, 0, false, err
+	}
+	cols := s.LastCols
+	rows := s.LastRows
+	if cols == 0 {
+		cols = 120
+	}
+	if rows == 0 {
+		rows = 32
+	}
+	return []byte(output), cols, rows, true, nil
+}
+
 func (s *Session) close() error {
 	s.mu.Lock()
 	if s.closed {
@@ -306,7 +542,15 @@ func (s *Session) close() error {
 	}
 	s.closed = true
 	s.mu.Unlock()
-
+	if s.TmuxSession != "" {
+		if s.pipe != nil {
+			_ = s.pipe.Close()
+		}
+		if s.PipePath != "" {
+			_ = os.Remove(s.PipePath)
+		}
+		return nil
+	}
 	if s.cmd != nil && s.cmd.Process != nil {
 		_ = syscall.Kill(-s.cmd.Process.Pid, syscall.SIGKILL)
 		_, _ = s.cmd.Process.Wait()
@@ -436,10 +680,8 @@ func (m *Manager) restoreSnapshots() {
 		return infoA.ModTime().After(infoB.ModTime())
 	})
 
+	var records []snapshotRecord
 	for _, entry := range files {
-		if len(m.sessions) >= m.maxSessions {
-			return
-		}
 		path := filepath.Join(m.snapshotDir, entry.Name())
 		raw, err := os.ReadFile(path)
 		if err != nil {
@@ -448,6 +690,13 @@ func (m *Manager) restoreSnapshots() {
 		var rec snapshotRecord
 		if err := json.Unmarshal(raw, &rec); err != nil {
 			continue
+		}
+		records = append(records, rec)
+	}
+
+	for _, rec := range records {
+		if len(m.sessions) >= m.maxSessions {
+			return
 		}
 		if rec.ID == "" {
 			continue
@@ -485,6 +734,104 @@ func (m *Manager) restoreSnapshots() {
 		s.LastSnapshot = rec.UpdatedAt
 		s.mu.Unlock()
 	}
+}
+
+func (m *Manager) restoreTmuxSessions() {
+	if m.tmux == nil {
+		return
+	}
+	sessions, err := m.tmux.ListSessions()
+	if err != nil {
+		return
+	}
+	for _, sess := range sessions {
+		if len(m.sessions) >= m.maxSessions {
+			return
+		}
+		if !strings.HasPrefix(sess.Name, "webterm-") {
+			continue
+		}
+		id := strings.TrimPrefix(sess.Name, "webterm-")
+		if id == "" {
+			continue
+		}
+		if _, exists := m.sessions[id]; exists {
+			continue
+		}
+		m.restoreSingleTmuxSession(sess)
+	}
+}
+
+func (m *Manager) restoreSingleTmuxSession(sess *gotmux.Session) {
+	if sess == nil || m.tmux == nil {
+		return
+	}
+	if len(m.sessions) >= m.maxSessions {
+		return
+	}
+	id := strings.TrimPrefix(sess.Name, "webterm-")
+	if id == "" {
+		return
+	}
+	panes, err := sess.ListPanes()
+	if err != nil || len(panes) == 0 {
+		return
+	}
+	pane := panes[0]
+	pipePath := filepath.Join(m.tmuxDir, id+".pipe")
+	_ = os.Remove(pipePath)
+	_ = syscall.Mkfifo(pipePath, 0o600)
+	_, _ = m.tmux.Command("pipe-pane", "-t", pane.Id)
+	if _, err := m.tmux.Command("pipe-pane", "-t", pane.Id, fmt.Sprintf("cat > %s", pipePath)); err != nil {
+		_ = os.Remove(pipePath)
+		return
+	}
+	pipeFile, err := os.OpenFile(pipePath, os.O_RDWR, 0o600)
+	if err != nil {
+		_, _ = m.tmux.Command("pipe-pane", "-t", pane.Id)
+		_ = os.Remove(pipePath)
+		return
+	}
+	cols := uint16(120)
+	rows := uint16(32)
+	if pane.Width > 0 {
+		cols = uint16(pane.Width)
+	}
+	if pane.Height > 0 {
+		rows = uint16(pane.Height)
+	}
+	name := m.tmuxSessionName(sess.Name)
+	if name == "" {
+		name = "Terminal"
+	}
+	now := time.Now().UTC()
+	s := &Session{
+		ID:           id,
+		Name:         name,
+		CreatedAt:    now,
+		LastActive:   now,
+		LastCols:     cols,
+		LastRows:     rows,
+		LastSnapshot: now,
+		TmuxSession:  sess.Name,
+		TmuxPane:     pane.Id,
+		PipePath:     pipePath,
+		pipe:         pipeFile,
+	}
+	m.mu.Lock()
+	m.sessions[id] = s
+	m.mu.Unlock()
+}
+
+func (m *Manager) tmuxSessionName(session string) string {
+	if m.tmux == nil {
+		return ""
+	}
+	value, err := m.tmux.Command("show-options", "-t", session, "-v", "@webterm_name")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(value)
 }
 
 func encryptSnapshot(plain []byte, key []byte) ([]byte, []byte, error) {

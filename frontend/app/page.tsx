@@ -5,7 +5,7 @@ import { cn } from "@/lib/utils";
 
 import { HeaderBar } from "@/components/terminal/HeaderBar";
 import { LoginScreen } from "@/components/terminal/LoginScreen";
-import { MetricsModal } from "@/components/terminal/MetricsModal";
+import { MonitoringModal } from "@/components/terminal/MonitoringModal";
 import { MobileStatusStrip } from "@/components/terminal/MobileStatusStrip";
 import { QuickSwitcher } from "@/components/terminal/QuickSwitcher";
 import { SettingsModal } from "@/components/terminal/SettingsModal";
@@ -14,19 +14,26 @@ import { TabsRow } from "@/components/terminal/TabsRow";
 import { TabActionsSheet } from "@/components/terminal/TabActionsSheet";
 import { TerminalStack } from "@/components/terminal/TerminalStack";
 import { ToastStack, ToastItem } from "@/components/terminal/ToastStack";
-import { LayoutNode, LayoutPaneNode, MetricsSnapshot, SessionInfo } from "@/components/terminal/types";
+import {
+	LayoutNode,
+	LayoutPaneNode,
+	MonitoringEvent,
+	MonitoringSessionSummary,
+	SessionInfo,
+} from "@/components/terminal/types";
 
 import type { Terminal } from "xterm";
 import type { FitAddon } from "xterm-addon-fit";
+import type { WebLinksAddon } from "xterm-addon-web-links";
 
 interface SessionTerminal {
 	terminal: Terminal;
 	fitAddon: FitAddon;
 	container: HTMLDivElement;
-	eventSource: EventSource;
-	observer: ResizeObserver;
+	socket: WebSocket;
 	replaying: boolean;
-	queue: string[];
+	queue: Uint8Array[];
+	canResize: boolean;
 }
 
 const TERM_OPTIONS = {
@@ -37,17 +44,10 @@ const TERM_OPTIONS = {
     "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace",
 } as const;
 
-const TERM_THEMES = {
-  dark: {
-    background: "#030712",
-    foreground: "#dbe5f5",
-    cursor: "#7dd3fc",
-  },
-  light: {
-    background: "#f8fafc",
-    foreground: "#0f172a",
-    cursor: "#0284c7",
-  },
+const TERM_THEME = {
+  background: "#030712",
+  foreground: "#dbe5f5",
+  cursor: "#7dd3fc",
 } as const;
 
 const CURSOR_STYLES = ["block", "bar", "underline"] as const;
@@ -71,8 +71,14 @@ function decodeBase64ToBytes(data: string): Uint8Array {
   return bytes;
 }
 
-function sseUrl(sessionId: string, csrf: string): string {
-	return `${window.location.origin}/api/terminal/stream/${sessionId}?csrf=${encodeURIComponent(csrf)}`;
+function wsUrl(sessionId: string, csrf: string, cols: number, rows: number): string {
+	const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+	const params = new URLSearchParams({
+		csrf,
+		cols: String(cols),
+		rows: String(rows),
+	});
+	return `${protocol}//${window.location.host}/api/terminal/ws/${sessionId}?${params.toString()}`;
 }
 
 interface PaneInfo {
@@ -122,14 +128,18 @@ export default function Page() {
   const [connected, setConnected] = useState(false);
   const [serverAlive, setServerAlive] = useState(true);
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const [theme, setTheme] = useState<"dark" | "light">("dark");
   const [fontSize, setFontSize] = useState(13);
   const [cursorStyle, setCursorStyle] = useState<(typeof CURSOR_STYLES)[number]>("block");
   const [dragId, setDragId] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [metrics, setMetrics] = useState<MetricsSnapshot | null>(null);
-  const [metricsOpen, setMetricsOpen] = useState<"cpu" | "memory" | "gpu" | null>(null);
-  const [metricsPage, setMetricsPage] = useState(0);
+  const [monitoringOpen, setMonitoringOpen] = useState(false);
+  const [monitoringSessions, setMonitoringSessions] = useState<MonitoringSessionSummary[]>([]);
+  const [monitoringActiveId, setMonitoringActiveId] = useState<string | null>(null);
+  const [monitoringEvents, setMonitoringEvents] = useState<Record<string, MonitoringEvent[]>>({});
+  const [monitoringNotifyTitle, setMonitoringNotifyTitle] = useState("");
+  const [monitoringNotifyMessage, setMonitoringNotifyMessage] = useState("");
+  const [monitoringNotifying, setMonitoringNotifying] = useState(false);
+  const monitoringStreamRef = useRef<EventSource | null>(null);
   const [detachedSessionId, setDetachedSessionId] = useState<string | null>(null);
   const [isDetached, setIsDetached] = useState(false);
   const [tabActionsId, setTabActionsId] = useState<string | null>(null);
@@ -147,14 +157,17 @@ export default function Page() {
   const terminalsRef = useRef<Map<string, SessionTerminal>>(new Map());
   const containerParentRef = useRef<HTMLDivElement | null>(null);
   const activeIdRef = useRef<string | null>(null);
-  const timersRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
-  const tabHoldTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
-  const mountedRef = useRef(true);
-  const lastActivityRef = useRef<Map<string, number>>(new Map());
-  const idleWarnedRef = useRef<Set<string>>(new Set());
-  const paneRefs = useRef<Map<string, HTMLDivElement>>(new Map());
-  const activePaneIdRef = useRef<string | null>(null);
-  const activeSessionIdRef = useRef<string | null>(null);
+	const timersRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
+	const fitTimersRef = useRef<Map<string, number>>(new Map());
+	const fitAttemptsRef = useRef<Map<string, number>>(new Map());
+	const tabHoldTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+	const mountedRef = useRef(true);
+	const lastActivityRef = useRef<Map<string, number>>(new Map());
+	const idleWarnedRef = useRef<Set<string>>(new Set());
+	const paneRefs = useRef<Map<string, HTMLDivElement>>(new Map());
+	const activeResizeObserverRef = useRef<ResizeObserver | null>(null);
+	const activePaneIdRef = useRef<string | null>(null);
+	const activeSessionIdRef = useRef<string | null>(null);
 
   const activeLayout = useMemo(
     () => (activeId ? layoutBySession[activeId] ?? null : null),
@@ -195,19 +208,6 @@ export default function Page() {
   }, []);
 
   useEffect(() => {
-    const stored = window.localStorage.getItem("webterm-theme");
-    if (stored === "light" || stored === "dark") {
-      setTheme(stored);
-      document.documentElement.dataset.theme = stored;
-      return;
-    }
-    const prefersLight = window.matchMedia("(prefers-color-scheme: light)").matches;
-    const initial = prefersLight ? "light" : "dark";
-    setTheme(initial);
-    document.documentElement.dataset.theme = initial;
-  }, []);
-
-  useEffect(() => {
     const storedFont = window.localStorage.getItem("webterm-font-size");
     const storedCursor = window.localStorage.getItem("webterm-cursor-style");
     if (storedFont) {
@@ -225,20 +225,22 @@ export default function Page() {
   /*  Xterm dynamic import cache                                       */
   /* ---------------------------------------------------------------- */
 
-  const xtermModRef = useRef<{ Terminal: typeof Terminal; FitAddon: typeof FitAddon } | null>(null);
+	const xtermModRef = useRef<
+		{ Terminal: typeof Terminal; FitAddon: typeof FitAddon; WebLinksAddon: typeof WebLinksAddon } | null
+	>(null);
 
-  const loadXterm = useCallback(async () => {
-    if (xtermModRef.current) return xtermModRef.current;
-    const [xtermMod, fitMod] = await Promise.all([
-      import("xterm"),
-      import("xterm-addon-fit"),
-    ]);
-    xtermModRef.current = {
-      Terminal: xtermMod.Terminal,
-      FitAddon: fitMod.FitAddon,
-    };
-    return xtermModRef.current;
-  }, []);
+	const loadXterm = useCallback(async () => {
+		if (xtermModRef.current) return xtermModRef.current;
+		const xtermMod = await import("xterm");
+		const fitMod = await import("xterm-addon-fit");
+		const webLinksMod = await import("xterm-addon-web-links");
+		xtermModRef.current = {
+			Terminal: xtermMod.Terminal,
+			FitAddon: fitMod.FitAddon,
+			WebLinksAddon: webLinksMod.WebLinksAddon,
+		};
+		return xtermModRef.current;
+	}, []);
 
   /* ---------------------------------------------------------------- */
   /*  Managed timers                                                   */
@@ -264,30 +266,42 @@ export default function Page() {
     [safeTimeout],
   );
 
-  const toggleTheme = useCallback(() => {
-    setTheme((prev) => {
-      const next = prev === "dark" ? "light" : "dark";
-      document.documentElement.dataset.theme = next;
-      window.localStorage.setItem("webterm-theme", next);
-      return next;
-    });
-  }, []);
-
   const getCSRFToken = useCallback(() => {
     return csrfRef.current || getCookie("webterm_csrf");
   }, []);
 
-  const markActivity = useCallback((id: string) => {
-    lastActivityRef.current.set(id, Date.now());
-    idleWarnedRef.current.delete(id);
-  }, []);
+	const markActivity = useCallback((id: string) => {
+		lastActivityRef.current.set(id, Date.now());
+		idleWarnedRef.current.delete(id);
+	}, []);
 
-  const postInput = useCallback(
-    async (id: string, input: string) => {
-      const csrf = getCSRFToken();
-      if (!csrf || !input) return;
-      try {
-        await fetch(`/api/terminal/input/${id}`, {
+	const sendSocketMessage = useCallback((id: string, payload: Record<string, unknown>) => {
+		const st = terminalsRef.current.get(id);
+		if (!st || st.socket.readyState !== WebSocket.OPEN) return false;
+		try {
+			st.socket.send(JSON.stringify(payload));
+			return true;
+		} catch (err) {
+			void err;
+			return false;
+		}
+	}, []);
+
+	const sendFocusEvent = useCallback(
+		(id: string, focused: boolean) => {
+			const seq = focused ? "\u001b[I" : "\u001b[O";
+			sendSocketMessage(id, { type: "input", data: seq });
+		},
+		[sendSocketMessage],
+	);
+
+	const postInput = useCallback(
+		async (id: string, input: string) => {
+			const csrf = getCSRFToken();
+			if (!csrf || !input) return;
+			if (sendSocketMessage(id, { type: "input", data: input })) return;
+			try {
+				await fetch(`/api/terminal/input/${id}`, {
           method: "POST",
           headers: {
             "Content-Type": "text/plain",
@@ -299,16 +313,17 @@ export default function Page() {
       } catch (err) {
         void err;
       }
-    },
-    [getCSRFToken],
-  );
+		},
+		[getCSRFToken, sendSocketMessage],
+	);
 
-  const postResize = useCallback(
-    async (id: string, cols: number, rows: number) => {
-      const csrf = getCSRFToken();
-      if (!csrf) return;
-      try {
-        await fetch(`/api/terminal/resize/${id}`, {
+	const postResize = useCallback(
+		async (id: string, cols: number, rows: number) => {
+			const csrf = getCSRFToken();
+			if (!csrf) return;
+			if (sendSocketMessage(id, { type: "resize", cols, rows })) return;
+			try {
+				await fetch(`/api/terminal/resize/${id}`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -320,9 +335,49 @@ export default function Page() {
       } catch (err) {
         void err;
       }
-    },
-    [getCSRFToken],
-  );
+		},
+		[getCSRFToken, sendSocketMessage],
+	);
+
+	const scheduleFit = useCallback(
+		(id: string, force = false) => {
+			const st = terminalsRef.current.get(id);
+			if (!st || (!st.canResize && !force)) return;
+			const existing = fitTimersRef.current.get(id);
+			if (existing) {
+				window.clearTimeout(existing);
+				fitTimersRef.current.delete(id);
+			}
+			const timeoutId = window.setTimeout(() => {
+				fitTimersRef.current.delete(id);
+				if (!st.container.isConnected) return;
+				const host = st.container.parentElement ?? st.container;
+				const { width, height } = host.getBoundingClientRect();
+			if (width < 2 || height < 2) {
+				const attempts = fitAttemptsRef.current.get(id) ?? 0;
+				if (attempts < 8) {
+					fitAttemptsRef.current.set(id, attempts + 1);
+					scheduleFit(id, force);
+				}
+				return;
+			}
+				fitAttemptsRef.current.delete(id);
+				try {
+					st.fitAddon.fit();
+				} catch {
+					/* ignore */
+				}
+				const cols = st.terminal.cols ?? 0;
+				const rows = st.terminal.rows ?? 0;
+				if (cols > 0 && rows > 0) {
+					void postResize(id, cols, rows);
+				}
+				st.terminal.focus();
+		}, 80);
+		fitTimersRef.current.set(id, timeoutId);
+		},
+		[postResize],
+	);
 
   const moveSession = useCallback((sourceId: string, targetId: string) => {
     if (sourceId === targetId) return;
@@ -376,40 +431,19 @@ export default function Page() {
   /*  Terminal lifecycle                                                */
   /* ---------------------------------------------------------------- */
 
-  const fitActive = useCallback(() => {
-    const id = activeSessionIdRef.current;
-    if (!id) return;
-    const st = terminalsRef.current.get(id);
-    if (!st) return;
-    try {
-      st.fitAddon.fit();
-    } catch {
-      /* container may not be visible yet */
-    }
-  }, []);
-
-  const deferredFitActive = useCallback(() => {
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        safeTimeout(fitActive, 120);
-      });
-    });
-  }, [fitActive, safeTimeout]);
-
   const switchToSession = useCallback((id: string) => {
     setActiveId(id);
   }, []);
 
   const dropSessionLocal = useCallback(
     (id: string) => {
-      const st = terminalsRef.current.get(id);
-      if (st) {
-        try {
-          st.eventSource.close();
-        } catch (err) {
-          void err;
-        }
-        st.observer.disconnect();
+		const st = terminalsRef.current.get(id);
+		if (st) {
+			try {
+				st.socket.close();
+			} catch (err) {
+				void err;
+			}
         st.terminal.dispose();
         st.container.parentNode?.removeChild(st.container);
         terminalsRef.current.delete(id);
@@ -449,14 +483,15 @@ export default function Page() {
       const parent = containerParentRef.current;
       if (!parent) return;
 
-      const terminal = new mods.Terminal({
-        ...TERM_OPTIONS,
-        fontSize,
-        cursorStyle,
-        theme: TERM_THEMES[theme],
-      });
-      const fitAddon = new mods.FitAddon();
-      terminal.loadAddon(fitAddon);
+		const terminal = new mods.Terminal({
+			...TERM_OPTIONS,
+			fontSize,
+			cursorStyle,
+			theme: TERM_THEME,
+		});
+		const fitAddon = new mods.FitAddon();
+		terminal.loadAddon(fitAddon);
+		terminal.loadAddon(new mods.WebLinksAddon());
 
       const container = document.createElement("div");
       container.className = "terminal-shell";
@@ -466,159 +501,199 @@ export default function Page() {
       container.style.visibility = "hidden";
       parent.appendChild(container);
 
-      terminal.open(container);
-
-      const observer = new ResizeObserver(() => {
-        if (activeSessionIdRef.current === session.id) {
-          requestAnimationFrame(() => {
-            try {
-              fitAddon.fit();
-            } catch (err) {
-              void err;
-            }
-          });
-        }
-      });
-      observer.observe(container);
-
-      const csrf = getCSRFToken();
-      const eventSource = new EventSource(sseUrl(session.id, csrf), { withCredentials: true });
-      if (!activeSessionIdRef.current || activeSessionIdRef.current === session.id) {
-        setConnected(eventSource.readyState !== EventSource.CLOSED);
-      }
-
-      const st: SessionTerminal = {
-        terminal,
-        fitAddon,
-        container,
-        eventSource,
-        observer,
-        replaying: true,
-        queue: [],
-      };
-
-      const handleStream = (data: string, onDone?: () => void) => {
-        if (!data) return;
-        const bytes = decodeBase64ToBytes(data);
-        markActivity(session.id);
-        st.terminal.write(bytes, onDone);
-      };
-
-      const flushQueue = () => {
-        if (st.queue.length === 0) return;
-        const queued = [...st.queue];
-        st.queue = [];
-        queued.forEach((item) => handleStream(item));
-      };
-
-      eventSource.addEventListener("snapshot", (ev: MessageEvent<string>) => {
-        let snapshotData = ev.data;
-        let cols = 0;
-        let rows = 0;
-        try {
-          const parsed = JSON.parse(ev.data) as {
-            data?: string;
-            cols?: number;
-            rows?: number;
-          };
-          if (parsed && typeof parsed.data === "string") {
-            snapshotData = parsed.data;
-          }
-          if (typeof parsed?.cols === "number") cols = parsed.cols;
-          if (typeof parsed?.rows === "number") rows = parsed.rows;
-        } catch (err) {
-          void err;
-        }
-
-        st.replaying = true;
-        st.terminal.reset();
-        if (cols > 0 && rows > 0) {
-          try {
-            st.terminal.resize(cols, rows);
-          } catch (err) {
-            void err;
-          }
-        }
-        handleStream(snapshotData, () => {
-          st.replaying = false;
-          flushQueue();
-          try {
-            st.fitAddon.fit();
-          } catch (err) {
-            void err;
-          }
-        });
-      });
-
-      eventSource.addEventListener("message", (ev: MessageEvent<string>) => {
-        if (st.replaying) {
-          st.queue.push(ev.data);
-          return;
-        }
-        handleStream(ev.data);
-      });
-
-      eventSource.addEventListener("open", () => {
-        if (activeSessionIdRef.current === session.id && mountedRef.current) {
-          setConnected(true);
+		terminal.open(container);
+		try {
+			fitAddon.fit();
+		} catch {
+			/* ignore */
+		}
+		container.addEventListener("mousedown", () => {
+			try {
+				terminal.focus();
+        } catch {
+          /* ignore */
         }
       });
 
-      safeTimeout(() => {
-        if (st.replaying) {
-          st.replaying = false;
-          flushQueue();
-        }
-      }, 800);
+		const csrf = getCSRFToken();
+		const ws = new WebSocket(
+			wsUrl(
+				session.id,
+				csrf,
+				Math.max(2, terminal.cols ?? 80),
+				Math.max(1, terminal.rows ?? 24),
+			),
+		);
+		ws.binaryType = "arraybuffer";
+		if (!activeSessionIdRef.current || activeSessionIdRef.current === session.id) {
+			setConnected(ws.readyState === WebSocket.OPEN);
+		}
 
-      eventSource.addEventListener("error", () => {
-        if (activeSessionIdRef.current === session.id && mountedRef.current) {
-          setConnected(false);
-        }
-      });
+		const st: SessionTerminal = {
+			terminal,
+			fitAddon,
+			container,
+			socket: ws,
+			replaying: true,
+			queue: [],
+			canResize: false,
+		};
+		terminalsRef.current.set(session.id, st);
+		requestAnimationFrame(() => scheduleFit(session.id, true));
+		window.setTimeout(() => scheduleFit(session.id, true), 200);
+		if (document.fonts?.ready) {
+			document.fonts.ready.then(() => scheduleFit(session.id, true)).catch(() => {
+				return;
+			});
+		}
 
-      terminal.onData((input: string) => {
-        const isMouse = input.startsWith("\u001b[M") || input.startsWith("\u001b[<");
-        const isFocus = input === "\u001b[I" || input === "\u001b[O";
-        if (isMouse || isFocus) {
-          const bufferType = st.terminal.buffer?.active?.type;
-          const modes = (terminal as Terminal & { modes?: { mouseTracking?: boolean; focus?: boolean } }).modes;
-          const allowMouse = bufferType === "alternate" && modes?.mouseTracking;
-          const allowFocus = bufferType === "alternate" && modes?.focus;
-          if (isMouse && !allowMouse) return;
-          if (isFocus && !allowFocus) return;
-        }
-        markActivity(session.id);
-        void postInput(session.id, input);
-      });
+		const handleStream = (bytes: Uint8Array, onDone?: () => void) => {
+			if (!bytes || bytes.length === 0) return;
+			markActivity(session.id);
+			st.terminal.write(bytes, onDone);
+		};
+
+		const flushQueue = () => {
+			if (st.queue.length === 0) return;
+			const queued = [...st.queue];
+			st.queue = [];
+			queued.forEach((item) => handleStream(item));
+		};
+
+		const handleSnapshot = (payload: string) => {
+			let snapshotData = payload;
+			let cols = 0;
+			let rows = 0;
+			let fromTmux = false;
+			try {
+				const parsed = JSON.parse(payload) as {
+					type?: string;
+					data?: string;
+					cols?: number;
+					rows?: number;
+					tmux?: boolean;
+				};
+				if (parsed && typeof parsed.data === "string") {
+					snapshotData = parsed.data;
+				}
+				if (typeof parsed?.cols === "number") cols = parsed.cols;
+				if (typeof parsed?.rows === "number") rows = parsed.rows;
+				if (parsed?.tmux) fromTmux = true;
+			} catch (err) {
+				void err;
+			}
+
+			st.replaying = true;
+			st.canResize = false;
+			st.terminal.reset();
+			if (cols > 0 && rows > 0) {
+				try {
+					st.terminal.resize(cols, rows);
+				} catch (err) {
+					void err;
+				}
+			}
+			if (fromTmux) {
+				try {
+					st.terminal.clear();
+				} catch {
+					/* ignore */
+				}
+			}
+			const bytes = decodeBase64ToBytes(snapshotData);
+			handleStream(bytes, () => {
+				st.replaying = false;
+				st.canResize = true;
+				flushQueue();
+				scheduleFit(session.id);
+			});
+		};
+
+		let didForceFit = false;
+		ws.addEventListener("message", (ev) => {
+			if (typeof ev.data === "string") {
+				try {
+					const parsed = JSON.parse(ev.data) as { type?: string };
+					if (parsed?.type === "snapshot") {
+						handleSnapshot(ev.data);
+						return;
+					}
+				} catch (err) {
+					void err;
+				}
+				return;
+			}
+
+			const bytes = ev.data instanceof ArrayBuffer ? new Uint8Array(ev.data) : null;
+			if (!bytes) return;
+			if (st.replaying) {
+				st.queue.push(bytes);
+				return;
+			}
+			if (!didForceFit) {
+				didForceFit = true;
+				scheduleFit(session.id, true);
+				window.setTimeout(() => scheduleFit(session.id, true), 120);
+			}
+			handleStream(bytes);
+		});
+
+		ws.addEventListener("open", () => {
+			if (activeSessionIdRef.current === session.id && mountedRef.current) {
+				setConnected(true);
+			}
+			scheduleFit(session.id, true);
+			window.setTimeout(() => scheduleFit(session.id, true), 160);
+		});
+
+		safeTimeout(() => {
+			if (st.replaying) {
+				st.replaying = false;
+				st.canResize = true;
+				flushQueue();
+				scheduleFit(session.id);
+			}
+		}, 800);
+
+		const handleSocketClosed = () => {
+			if (activeSessionIdRef.current === session.id && mountedRef.current) {
+				setConnected(false);
+			}
+		};
+		ws.addEventListener("close", handleSocketClosed);
+		ws.addEventListener("error", handleSocketClosed);
+
+		terminal.onData((input: string) => {
+			markActivity(session.id);
+			void postInput(session.id, input);
+		});
 
       terminal.onResize(({ cols, rows }: { cols: number; rows: number }) => {
+        if (!st.canResize) return;
         void postResize(session.id, cols, rows);
       });
 
-      terminalsRef.current.set(session.id, st);
-      markActivity(session.id);
-      setSessions((prev) => (prev.some((s) => s.id === session.id) ? prev : [...prev, session]));
+		markActivity(session.id);
+		setSessions((prev) => (prev.some((s) => s.id === session.id) ? prev : [...prev, session]));
 
       switchToSession(session.id);
-
       try {
-        fitAddon.fit();
-      } catch (err) {
-        void err;
+        terminal.focus();
+      } catch {
+        /* ignore */
       }
+
     },
-    [
-      getCSRFToken,
-      loadXterm,
-      postInput,
-      postResize,
-      switchToSession,
-      theme,
-      fontSize,
-      cursorStyle,
-      markActivity,
-    ],
+	[
+		getCSRFToken,
+		loadXterm,
+		postInput,
+		postResize,
+		switchToSession,
+		fontSize,
+		cursorStyle,
+		markActivity,
+	],
   );
 
   const createSession = useCallback(
@@ -721,6 +796,40 @@ export default function Page() {
     }
   }, [postInput, pushToast]);
 
+  const handleSendNotify = useCallback(async () => {
+    if (!monitoringActiveId) return;
+    if (!monitoringNotifyTitle.trim()) {
+      pushToast("Title required", "error");
+      return;
+    }
+    setMonitoringNotifying(true);
+    try {
+      const res = await fetch("/api/monitoring/v1/notify", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          session_id: monitoringActiveId,
+          title: monitoringNotifyTitle,
+          message: monitoringNotifyMessage,
+          level: "wait",
+        }),
+      });
+      if (!res.ok) {
+        pushToast("Notification failed", "error");
+        return;
+      }
+      pushToast("Notification sent", "success");
+      setMonitoringNotifyTitle("");
+      setMonitoringNotifyMessage("");
+    } catch (err) {
+      void err;
+      pushToast("Notification failed", "error");
+    } finally {
+      setMonitoringNotifying(false);
+    }
+  }, [monitoringActiveId, monitoringNotifyTitle, monitoringNotifyMessage, pushToast]);
+
   /* ---------------------------------------------------------------- */
   /*  Auth                                                             */
   /* ---------------------------------------------------------------- */
@@ -819,13 +928,12 @@ export default function Page() {
 
     return () => {
       mountedRef.current = false;
-      terminalsRef.current.forEach((st) => {
-        try {
-          st.eventSource.close();
-        } catch (err) {
-          void err;
-        }
-        st.observer.disconnect();
+		terminalsRef.current.forEach((st) => {
+			try {
+				st.socket.close();
+			} catch (err) {
+				void err;
+			}
         st.terminal.dispose();
         st.container.parentNode?.removeChild(st.container);
       });
@@ -873,28 +981,98 @@ export default function Page() {
     };
   }, [authenticated]);
 
+
   useEffect(() => {
-    if (!authenticated) return;
+    if (!monitoringOpen) return;
     let cancelled = false;
 
-    const loadMetrics = async () => {
+    const loadSummary = async () => {
       try {
-        const res = await fetch(`/api/metrics?limit=10&offset=${metricsPage * 10}`, { credentials: "include" });
+        const res = await fetch("/api/monitoring/v1/summary", { credentials: "include" });
         if (!res.ok) return;
-        const data = (await res.json()) as MetricsSnapshot;
-        if (!cancelled) setMetrics(data);
+        const data = (await res.json()) as { sessions: MonitoringSessionSummary[] };
+        if (cancelled) return;
+        const normalized = (data.sessions ?? []).map((session) => ({
+          ...session,
+          activity: session.activity ?? [],
+        }));
+        setMonitoringSessions(normalized);
+        if (!monitoringActiveId && data.sessions?.length) {
+          setMonitoringActiveId(data.sessions[0].id);
+        }
       } catch (err) {
         void err;
       }
     };
 
-    void loadMetrics();
-    const id = window.setInterval(loadMetrics, 5000);
+    void loadSummary();
+    const es = new EventSource("/api/monitoring/v1/stream", { withCredentials: true });
+    monitoringStreamRef.current = es;
+    es.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data) as { type: string; payload: any };
+        if (msg.type === "snapshot" || msg.type === "update") {
+          const sessions = msg.payload?.sessions as MonitoringSessionSummary[] | undefined;
+          if (sessions && !cancelled) {
+            const normalized = sessions.map((session) => ({
+              ...session,
+              activity: session.activity ?? [],
+            }));
+            setMonitoringSessions(normalized);
+            if (!monitoringActiveId && sessions.length) {
+              setMonitoringActiveId(sessions[0].id);
+            }
+          }
+        }
+        if (msg.type === "event") {
+          const evt = msg.payload as MonitoringEvent;
+          if (!evt?.session_id) return;
+          setMonitoringEvents((prev) => {
+            const list = prev[evt.session_id] ?? [];
+            return { ...prev, [evt.session_id]: [evt, ...list].slice(0, 50) };
+          });
+        }
+      } catch (err) {
+        void err;
+      }
+    };
+    es.onerror = () => {
+      if (monitoringStreamRef.current) {
+        monitoringStreamRef.current.close();
+      }
+    };
+
     return () => {
       cancelled = true;
-      window.clearInterval(id);
+      if (monitoringStreamRef.current) {
+        monitoringStreamRef.current.close();
+      }
     };
-  }, [authenticated, metricsPage]);
+  }, [monitoringOpen, monitoringActiveId]);
+
+  useEffect(() => {
+    if (!monitoringActiveId) return;
+    const loadEvents = async () => {
+      try {
+        const res = await fetch(`/api/monitoring/v1/events?session_id=${monitoringActiveId}`, {
+          credentials: "include",
+        });
+        if (!res.ok) return;
+        const data = (await res.json()) as { events: MonitoringEvent[] };
+        setMonitoringEvents((prev) => ({ ...prev, [monitoringActiveId]: data.events ?? [] }));
+      } catch (err) {
+        void err;
+      }
+    };
+
+    void loadEvents();
+  }, [monitoringActiveId]);
+
+  useEffect(() => {
+    if (!monitoringActiveId) return;
+    setMonitoringNotifyTitle("");
+    setMonitoringNotifyMessage("");
+  }, [monitoringActiveId]);
 
   useEffect(() => {
     if (!activeId) return;
@@ -910,37 +1088,31 @@ export default function Page() {
     }
   }, [activeId, layoutBySession, activePaneBySession]);
 
-  useEffect(() => {
-    if (!activePaneSessionId) {
-      setConnected(false);
-      return;
-    }
-    const st = terminalsRef.current.get(activePaneSessionId);
-    if (!st) return;
-    setConnected(st.eventSource.readyState !== EventSource.CLOSED);
-    requestAnimationFrame(() => {
-      try {
-        st.fitAddon.fit();
-      } catch {
-        /* ignore */
-      }
-      st.terminal.focus();
-    });
-  }, [activePaneSessionId]);
+	useEffect(() => {
+		if (!activePaneSessionId) {
+			setConnected(false);
+			return;
+		}
+		const st = terminalsRef.current.get(activePaneSessionId);
+		if (!st) return;
+		setConnected(st.socket.readyState === WebSocket.OPEN);
+		scheduleFit(activePaneSessionId);
+	}, [activePaneSessionId, scheduleFit]);
 
-  useEffect(() => {
-    if (!activeId) return;
-    const panes = activePanes;
-    panes.forEach((pane) => {
-      const st = terminalsRef.current.get(pane.sessionId);
-      const host = paneRefs.current.get(pane.id);
-      if (!st || !host) return;
-      if (st.container.parentNode !== host) {
-        host.appendChild(st.container);
-      }
-      st.container.style.visibility = "visible";
-      st.container.style.zIndex = "1";
-    });
+	useEffect(() => {
+		if (!activeId) return;
+		const panes = activePanes;
+		panes.forEach((pane) => {
+			const st = terminalsRef.current.get(pane.sessionId);
+			const host = paneRefs.current.get(pane.id);
+			if (!st || !host) return;
+			if (st.container.parentNode !== host) {
+				host.appendChild(st.container);
+			}
+			st.container.style.visibility = "visible";
+			st.container.style.zIndex = "1";
+			st.canResize = pane.sessionId === activePaneSessionId;
+		});
     terminalsRef.current.forEach((st, id) => {
       if (!panes.some((p) => p.sessionId === id)) {
         st.container.style.visibility = "hidden";
@@ -949,18 +1121,30 @@ export default function Page() {
         }
       }
     });
-    requestAnimationFrame(() => {
-      panes.forEach((pane) => {
-        const st = terminalsRef.current.get(pane.sessionId);
-        if (!st) return;
-        try {
-          st.fitAddon.fit();
-        } catch {
-          /* ignore */
-        }
-      });
-    });
-  }, [activeId, activePanes]);
+		requestAnimationFrame(() => {
+			if (!activeId) return;
+			scheduleFit(activeId);
+		});
+	}, [activeId, activePanes, activePaneSessionId, scheduleFit]);
+
+	useEffect(() => {
+		if (!activeId || !activePaneId) return;
+		const host = paneRefs.current.get(activePaneId) ?? null;
+		activeResizeObserverRef.current?.disconnect();
+		if (!host) {
+			safeTimeout(() => {
+				if (activeIdRef.current === activeId) scheduleFit(activeId);
+			}, 120);
+			return;
+		}
+		const observer = new ResizeObserver(() => {
+			scheduleFit(activeId);
+		});
+		observer.observe(host);
+		activeResizeObserverRef.current = observer;
+		scheduleFit(activeId);
+		return () => observer.disconnect();
+	}, [activeId, activePaneId, safeTimeout, scheduleFit]);
 
   useEffect(() => {
     if (!authenticated) return;
@@ -993,7 +1177,7 @@ export default function Page() {
       }
       document.documentElement.style.setProperty("--app-height", `${height}px`);
       document.documentElement.style.setProperty("--keyboard-offset", `${keyboardOffset}px`);
-      deferredFitActive();
+      if (activeIdRef.current) scheduleFit(activeIdRef.current);
     };
 
     updateViewport();
@@ -1007,73 +1191,89 @@ export default function Page() {
       window.removeEventListener("orientationchange", updateViewport);
       window.removeEventListener("resize", updateViewport);
     };
-  }, [deferredFitActive]);
+  }, [scheduleFit]);
 
-  useEffect(() => {
-    terminalsRef.current.forEach((st) => {
-      st.terminal.options.theme = TERM_THEMES[theme];
-      st.terminal.refresh(0, st.terminal.rows - 1);
-    });
-  }, [theme]);
-
-  useEffect(() => {
-    terminalsRef.current.forEach((st) => {
-      st.terminal.options.fontSize = fontSize;
-      st.terminal.options.cursorStyle = cursorStyle;
-      try {
-        st.fitAddon.fit();
-      } catch (err) {
-        void err;
-      }
-    });
-    window.localStorage.setItem("webterm-font-size", String(fontSize));
-    window.localStorage.setItem("webterm-cursor-style", cursorStyle);
-  }, [fontSize, cursorStyle]);
+	useEffect(() => {
+		terminalsRef.current.forEach((st) => {
+			st.terminal.options.fontSize = fontSize;
+			st.terminal.options.cursorStyle = cursorStyle;
+		});
+		window.localStorage.setItem("webterm-font-size", String(fontSize));
+		window.localStorage.setItem("webterm-cursor-style", cursorStyle);
+		const activeId = activeSessionIdRef.current;
+		if (activeId) scheduleFit(activeId);
+	}, [fontSize, cursorStyle, scheduleFit]);
 
   /* ---------------------------------------------------------------- */
   /*  Global events                                                    */
   /* ---------------------------------------------------------------- */
 
-  useEffect(() => {
-    const handleVisibility = () => {
-      if (document.visibilityState === "visible") {
-        const id = activeSessionIdRef.current;
-        if (!id) return;
-        const st = terminalsRef.current.get(id);
-        if (!st) return;
-        try {
-          st.fitAddon.fit();
-          st.terminal.refresh(0, st.terminal.rows - 1);
-        } catch {
-          /* ignore */
-        }
-      }
-    };
+	useEffect(() => {
+		const handleFullscreenChange = () => {
+			const fs = !!document.fullscreenElement;
+			setIsFullscreen(fs);
+			if (activeIdRef.current) {
+				scheduleFit(activeIdRef.current);
+				window.setTimeout(() => scheduleFit(activeIdRef.current as string), 140);
+			}
+		};
 
-    const handleFullscreenChange = () => {
-      const fs = !!document.fullscreenElement;
-      setIsFullscreen(fs);
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          safeTimeout(fitActive, 150);
-        });
-      });
-    };
-
-    const handleResize = () => {
-      deferredFitActive();
-    };
-
-    document.addEventListener("visibilitychange", handleVisibility);
     document.addEventListener("fullscreenchange", handleFullscreenChange);
-    window.addEventListener("resize", handleResize);
-
     return () => {
-      document.removeEventListener("visibilitychange", handleVisibility);
       document.removeEventListener("fullscreenchange", handleFullscreenChange);
-      window.removeEventListener("resize", handleResize);
     };
-  }, [fitActive, deferredFitActive, safeTimeout]);
+	}, [scheduleFit]);
+
+	useEffect(() => {
+		const handleVisibility = () => {
+			const id = activeSessionIdRef.current;
+			if (!id) return;
+			if (document.hidden) {
+				sendFocusEvent(id, false);
+				return;
+			}
+			scheduleFit(id);
+			const st = terminalsRef.current.get(id);
+			if (st) {
+				try {
+					st.terminal.focus();
+				} catch {
+					/* ignore */
+				}
+			}
+			sendFocusEvent(id, true);
+		};
+
+		const handleWindowFocus = () => {
+			const id = activeSessionIdRef.current;
+			if (!id || document.hidden) return;
+			scheduleFit(id);
+			const st = terminalsRef.current.get(id);
+			if (st) {
+				try {
+					st.terminal.focus();
+				} catch {
+					/* ignore */
+				}
+			}
+			sendFocusEvent(id, true);
+		};
+
+		const handleWindowBlur = () => {
+			const id = activeSessionIdRef.current;
+			if (!id) return;
+			sendFocusEvent(id, false);
+		};
+
+		document.addEventListener("visibilitychange", handleVisibility);
+		window.addEventListener("focus", handleWindowFocus);
+		window.addEventListener("blur", handleWindowBlur);
+		return () => {
+			document.removeEventListener("visibilitychange", handleVisibility);
+			window.removeEventListener("focus", handleWindowFocus);
+			window.removeEventListener("blur", handleWindowBlur);
+		};
+	}, [scheduleFit, sendFocusEvent]);
 
   /* ---------------------------------------------------------------- */
   /*  Fullscreen                                                       */
@@ -1097,6 +1297,7 @@ export default function Page() {
   const activeSession = sessions.find((s) => s.id === activeId);
   const showConnected = connected && serverAlive;
   const activeForActions = sessions.find((s) => s.id === tabActionsId) ?? null;
+  const monitoringEventList = monitoringActiveId ? monitoringEvents[monitoringActiveId] ?? [] : [];
   const orderedSessions = useMemo(() => sessions, [sessions]);
   const visibleSessions = useMemo(() => {
     if (isDetached && detachedSessionId) {
@@ -1157,18 +1358,16 @@ export default function Page() {
   /* ================================================================ */
 
   if (!authenticated) {
-    return (
-      <LoginScreen
-        password={password}
-        loginError={loginError}
-        loggingIn={loggingIn}
-        theme={theme}
-        onPasswordChange={setPassword}
-        onSubmit={handleLogin}
-        onThemeToggle={toggleTheme}
-      />
-    );
-  }
+		return (
+			<LoginScreen
+				password={password}
+				loginError={loginError}
+				loggingIn={loggingIn}
+				onPasswordChange={setPassword}
+				onSubmit={handleLogin}
+			/>
+		);
+	}
 
   /* ================================================================ */
   /*  TERMINAL WORKSPACE                                               */
@@ -1182,15 +1381,12 @@ export default function Page() {
         isFullscreen && "fixed inset-0 z-50",
       )}
     >
-      <HeaderBar
-        theme={theme}
-        metrics={metrics}
-        showConnected={showConnected}
-        isFullscreen={isFullscreen}
-        onThemeToggle={toggleTheme}
-        onMetricsOpen={setMetricsOpen}
-      />
-      <MobileStatusStrip metrics={metrics} showConnected={showConnected} isFullscreen={isFullscreen} />
+		<HeaderBar
+			showConnected={showConnected}
+			isFullscreen={isFullscreen}
+			onMonitoringOpen={() => setMonitoringOpen(true)}
+		/>
+      <MobileStatusStrip showConnected={showConnected} isFullscreen={isFullscreen} />
 
       {/* ---- main ---- */}
       <div className={cn("flex min-h-0 w-full flex-1 flex-col pb-8", isFullscreen && "h-screen")}>
@@ -1258,23 +1454,14 @@ export default function Page() {
           layout={activeLayout}
           activePaneId={activePaneId}
           isFullscreen={isFullscreen}
-          onActivatePane={(id) => {
-            if (!activeId) return;
-            setActivePaneBySession((prev) => ({ ...prev, [activeId]: id }));
-            if (!activeLayout) return;
-            const pane = findPaneById(activeLayout, id);
-            if (!pane) return;
-            const st = terminalsRef.current.get(pane.sessionId);
-            if (!st) return;
-            requestAnimationFrame(() => {
-              try {
-                st.fitAddon.fit();
-              } catch {
-                /* ignore */
-              }
-              st.terminal.focus();
-            });
-          }}
+			onActivatePane={(id) => {
+				if (!activeId) return;
+				setActivePaneBySession((prev) => ({ ...prev, [activeId]: id }));
+				if (!activeLayout) return;
+				const pane = findPaneById(activeLayout, id);
+				if (!pane) return;
+				scheduleFit(pane.sessionId);
+			}}
           registerPaneRef={(id, node) => {
             if (node) {
               paneRefs.current.set(id, node);
@@ -1303,12 +1490,20 @@ export default function Page() {
         onCursorStyleChange={(value) => setCursorStyle(value as (typeof CURSOR_STYLES)[number])}
       />
 
-      <MetricsModal
-        open={metricsOpen}
-        metrics={metrics}
-        metricsPage={metricsPage}
-        onClose={() => setMetricsOpen(null)}
-        onPageChange={setMetricsPage}
+
+      <MonitoringModal
+        open={monitoringOpen}
+        sessions={monitoringSessions}
+        selectedId={monitoringActiveId}
+        events={monitoringEventList}
+        notifyTitle={monitoringNotifyTitle}
+        notifyMessage={monitoringNotifyMessage}
+        notifying={monitoringNotifying}
+        onClose={() => setMonitoringOpen(false)}
+        onSelect={(id) => setMonitoringActiveId(id)}
+        onNotifyTitleChange={setMonitoringNotifyTitle}
+        onNotifyMessageChange={setMonitoringNotifyMessage}
+        onSendNotify={handleSendNotify}
       />
 
       <TabActionsSheet

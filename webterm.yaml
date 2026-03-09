@@ -9,6 +9,7 @@ auth:
     rate_limit_max: 10
     rate_limit_window: 10m
 terminal:
+    backend: tmux
     shell: /bin/zsh
     working_dir: "~/workspace"
     user: ""

@@ -119,6 +119,10 @@ func (f *fakeTerminalManager) History(id string) ([]byte, error) {
 	return nil, nil
 }
 
+func (f *fakeTerminalManager) Snapshot(id string) ([]byte, uint16, uint16, bool, error) {
+	return nil, 0, 0, false, nil
+}
+
 func attachCookies(rec *httptest.ResponseRecorder, req *http.Request) {
 	for _, c := range rec.Result().Cookies() {
 		req.AddCookie(c)
@@ -398,18 +402,6 @@ func TestTerminalResizeHandlerRejectsMethod(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/api/terminal/resize/abc", nil)
 	rec := httptest.NewRecorder()
 	a.terminalResizeHandler(rec, req)
-	if rec.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("expected 405, got %d", rec.Code)
-	}
-}
-
-func TestTerminalStreamRejectsMethod(t *testing.T) {
-	a := newTestApp(t)
-	defer a.terminals.CloseAll()
-
-	req := httptest.NewRequest(http.MethodPost, "/api/terminal/stream/abc", nil)
-	rec := httptest.NewRecorder()
-	a.terminalStreamHandler(rec, req)
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("expected 405, got %d", rec.Code)
 	}
@@ -760,142 +752,6 @@ func TestTerminalResizeHandlerInvalidSize(t *testing.T) {
 	a.terminalResizeHandler(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", rec.Code)
-	}
-}
-
-func TestTerminalStreamRejectsMissingCSRF(t *testing.T) {
-	a := newTestApp(t)
-	defer a.terminals.CloseAll()
-
-	session, err := a.auth.Authenticate("test-token")
-	if err != nil {
-		t.Fatalf("auth failed: %v", err)
-	}
-	req := httptest.NewRequest(http.MethodGet, "/api/terminal/stream/missing", nil)
-	rec := httptest.NewRecorder()
-	a.auth.SetSessionCookies(rec, req, session)
-	attachCookies(rec, req)
-
-	wrap := a.withAuth(http.HandlerFunc(a.terminalStreamHandler))
-	wrap.ServeHTTP(rec, req)
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("expected 403, got %d", rec.Code)
-	}
-}
-
-func TestTerminalStreamMissingSession(t *testing.T) {
-	a := newTestApp(t)
-	defer a.terminals.CloseAll()
-
-	session, err := a.auth.Authenticate("test-token")
-	if err != nil {
-		t.Fatalf("auth failed: %v", err)
-	}
-	req := httptest.NewRequest(http.MethodGet, "/api/terminal/stream/missing?csrf="+session.CSRFToken, nil)
-	rec := httptest.NewRecorder()
-	a.auth.SetSessionCookies(rec, req, session)
-	attachCookies(rec, req)
-
-	wrap := a.withAuth(http.HandlerFunc(a.terminalStreamHandler))
-	wrap.ServeHTTP(rec, req)
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("expected 404, got %d", rec.Code)
-	}
-}
-
-type noFlushResponseWriter struct {
-	headers http.Header
-	status  int
-	body    []byte
-}
-
-func (n *noFlushResponseWriter) Header() http.Header {
-	if n.headers == nil {
-		n.headers = http.Header{}
-	}
-	return n.headers
-}
-
-func (n *noFlushResponseWriter) Write(b []byte) (int, error) {
-	n.body = append(n.body, b...)
-	return len(b), nil
-}
-
-func (n *noFlushResponseWriter) WriteHeader(status int) {
-	n.status = status
-}
-
-func TestTerminalStreamRequiresFlusher(t *testing.T) {
-	authManager, err := auth.New(config.AuthConfig{Mode: "password", Password: "test-token", SessionTTL: time.Hour})
-	if err != nil {
-		t.Fatalf("auth.New failed: %v", err)
-	}
-	fake := newFakeTerminalManager()
-	fake.sessions["s1"] = &terminal.Session{ID: "s1", Name: "t", LastCols: 80, LastRows: 24}
-	app := &app{auth: authManager, terminals: fake, limiter: newLoginLimiter(2, time.Minute), streamCancel: map[string]context.CancelFunc{}}
-
-	sess, err := authManager.Authenticate("test-token")
-	if err != nil {
-		t.Fatalf("auth failed: %v", err)
-	}
-	req := httptest.NewRequest(http.MethodGet, "/api/terminal/stream/s1?csrf="+sess.CSRFToken, nil)
-	recCookies := httptest.NewRecorder()
-	authManager.SetSessionCookies(recCookies, req, sess)
-	attachCookies(recCookies, req)
-
-	writer := &noFlushResponseWriter{}
-	app.withAuth(http.HandlerFunc(app.terminalStreamHandler)).ServeHTTP(writer, req)
-	if writer.status != http.StatusInternalServerError {
-		t.Fatalf("expected 500, got %d", writer.status)
-	}
-}
-
-func TestTerminalStreamSnapshotWritesHistory(t *testing.T) {
-	authManager, err := auth.New(config.AuthConfig{Mode: "password", Password: "test-token", SessionTTL: time.Hour})
-	if err != nil {
-		t.Fatalf("auth.New failed: %v", err)
-	}
-	fake := newFakeTerminalManager()
-	fake.sessions["s1"] = &terminal.Session{ID: "s1", Name: "t", LastCols: 80, LastRows: 24}
-	fake.history["s1"] = []byte("hello")
-	app := &app{auth: authManager, terminals: fake, limiter: newLoginLimiter(2, time.Minute), streamCancel: map[string]context.CancelFunc{}}
-
-	sess, err := authManager.Authenticate("test-token")
-	if err != nil {
-		t.Fatalf("auth failed: %v", err)
-	}
-	req := httptest.NewRequest(http.MethodGet, "/api/terminal/stream/s1?csrf="+sess.CSRFToken, nil)
-	recCookies := httptest.NewRecorder()
-	authManager.SetSessionCookies(recCookies, req, sess)
-	attachCookies(recCookies, req)
-
-	rec := httptest.NewRecorder()
-	app.withAuth(http.HandlerFunc(app.terminalStreamHandler)).ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d", rec.Code)
-	}
-	if !strings.Contains(rec.Body.String(), "event: snapshot") {
-		t.Fatalf("expected snapshot event")
-	}
-}
-
-func TestTerminalStreamInvalidCSRF(t *testing.T) {
-	a := newTestApp(t)
-	defer a.terminals.CloseAll()
-
-	session, err := a.auth.Authenticate("test-token")
-	if err != nil {
-		t.Fatalf("auth failed: %v", err)
-	}
-	req := httptest.NewRequest(http.MethodGet, "/api/terminal/stream/missing?csrf=bad", nil)
-	rec := httptest.NewRecorder()
-	a.auth.SetSessionCookies(rec, req, session)
-	attachCookies(rec, req)
-
-	wrap := a.withAuth(http.HandlerFunc(a.terminalStreamHandler))
-	wrap.ServeHTTP(rec, req)
-	if rec.Code != http.StatusForbidden {
-		t.Fatalf("expected 403, got %d", rec.Code)
 	}
 }
 

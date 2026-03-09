@@ -5,12 +5,12 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"io/fs"
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -20,12 +20,31 @@ import (
 	"webterm/frontend"
 	"webterm/internal/auth"
 	"webterm/internal/config"
+	"webterm/internal/monitoring"
 	"webterm/internal/terminal"
+
+	"github.com/gorilla/websocket"
 )
 
 const (
 	streamReadBufferSize = 32 * 1024
 )
+
+var wsUpgrader = websocket.Upgrader{
+	ReadBufferSize:  streamReadBufferSize,
+	WriteBufferSize: streamReadBufferSize,
+	CheckOrigin: func(r *http.Request) bool {
+		origin := strings.TrimSpace(r.Header.Get("Origin"))
+		if origin == "" {
+			return true
+		}
+		parsed, err := url.Parse(origin)
+		if err != nil {
+			return false
+		}
+		return strings.EqualFold(parsed.Host, r.Host)
+	},
+}
 
 type terminalManager interface {
 	List() []*terminal.Session
@@ -38,6 +57,7 @@ type terminalManager interface {
 	Write(id string, data []byte) (int, error)
 	Resize(id string, cols uint16, rows uint16) error
 	History(id string) ([]byte, error)
+	Snapshot(id string) ([]byte, uint16, uint16, bool, error)
 }
 
 type app struct {
@@ -47,6 +67,8 @@ type app struct {
 	streamMu     sync.Mutex
 	streamCancel map[string]context.CancelFunc
 	idleTimeout  time.Duration
+	monitoring   *monitoring.Manager
+	monitorToken string
 }
 
 type contextKey string
@@ -134,30 +156,54 @@ func Run(ctx context.Context, cfg config.Config) error {
 		return err
 	}
 
+	var monitoringManager *monitoring.Manager
+	if cfg.Monitoring.Enabled {
+		monitorPath, pathErr := resolveHomePath(cfg.Monitoring.DBPath)
+		if pathErr != nil {
+			return pathErr
+		}
+		store, storeErr := monitoring.OpenStore(monitorPath)
+		if storeErr != nil {
+			return storeErr
+		}
+		monitoringManager = monitoring.NewManager(store, cfg.Monitoring.Retention)
+	}
+
 	application := &app{
 		auth:         authManager,
 		terminals:    terminalManager,
 		limiter:      newLoginLimiter(cfg.Auth.RateLimitMax, cfg.Auth.RateLimitWindow),
 		streamCancel: map[string]context.CancelFunc{},
 		idleTimeout:  cfg.Sessions.IdleTimeout,
+		monitoring:   monitoringManager,
+		monitorToken: cfg.Monitoring.Token,
 	}
 	if application.idleTimeout <= 0 {
 		application.idleTimeout = 24 * time.Hour
 	}
 
 	defer terminalManager.CloseAll()
+	if monitoringManager != nil {
+		defer monitoringManager.Store().Close()
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/health", healthHandler)
 	mux.HandleFunc("/api/login", application.loginHandler)
 	mux.Handle("/api/logout", application.withAuth(application.withCSRF(http.HandlerFunc(application.logoutHandler))))
 	mux.Handle("/api/me", application.withAuth(http.HandlerFunc(application.meHandler)))
-	mux.Handle("/api/metrics", application.withAuth(http.HandlerFunc(application.metricsHandler)))
 	mux.Handle("/api/terminal/sessions", application.withAuth(http.HandlerFunc(application.sessionsHandler)))
 	mux.Handle("/api/terminal/sessions/", application.withAuth(http.HandlerFunc(application.sessionByIDHandler)))
-	mux.Handle("/api/terminal/stream/", application.withAuth(http.HandlerFunc(application.terminalStreamHandler)))
+	mux.Handle("/api/terminal/ws/", application.withAuth(http.HandlerFunc(application.terminalWebsocketHandler)))
 	mux.Handle("/api/terminal/input/", application.withAuth(application.withCSRF(http.HandlerFunc(application.terminalInputHandler))))
 	mux.Handle("/api/terminal/resize/", application.withAuth(application.withCSRF(http.HandlerFunc(application.terminalResizeHandler))))
+	mux.Handle("/api/monitoring/v1/ingest", http.HandlerFunc(application.monitoringIngestHandler))
+	mux.Handle("/api/monitoring/v1/sessions", http.HandlerFunc(application.monitoringSessionsHandler))
+	mux.Handle("/api/monitoring/v1/summary", http.HandlerFunc(application.monitoringSummaryHandler))
+	mux.Handle("/api/monitoring/v1/stream", http.HandlerFunc(application.monitoringStreamHandler))
+	mux.Handle("/api/monitoring/v1/notify", http.HandlerFunc(application.monitoringNotifyHandler))
+	mux.Handle("/api/monitoring/v1/events", http.HandlerFunc(application.monitoringEventsHandler))
+	mux.Handle("/api/monitoring/v1/logbook/", http.HandlerFunc(application.monitoringLogbookHandler))
 
 	frontendFS, err := fs.Sub(frontend.Dist, frontend.RootDir)
 	if err != nil {
@@ -268,26 +314,6 @@ func (a *app) meHandler(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (a *app) metricsHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	limit := 6
-	offset := 0
-	if raw := r.URL.Query().Get("limit"); raw != "" {
-		if parsed, err := strconv.Atoi(raw); err == nil {
-			limit = parsed
-		}
-	}
-	if raw := r.URL.Query().Get("offset"); raw != "" {
-		if parsed, err := strconv.Atoi(raw); err == nil {
-			offset = parsed
-		}
-	}
-	writeJSON(w, http.StatusOK, collectMetrics(limit, offset))
-}
-
 func (a *app) sessionsHandler(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -323,6 +349,24 @@ func (a *app) sessionsHandler(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
+		}
+		if a.monitoring != nil {
+			_ = a.monitoring.Notify(r.Context(), monitoring.Event{
+				SessionID: s.ID,
+				Type:      "info",
+				Title:     "Session started",
+				Message:   "New session created",
+				Timestamp: time.Now().UTC(),
+			}, &monitoring.SessionSummary{
+				ID:           s.ID,
+				Name:         s.Name,
+				Command:      "",
+				ProcessID:    0,
+				Status:       "running",
+				Attention:    "low",
+				LastActivity: s.LastActive,
+				CPUPercent:   0,
+			})
 		}
 		writeJSON(w, http.StatusCreated, map[string]any{
 			"id":         s.ID,
@@ -376,7 +420,7 @@ func (a *app) sessionByIDHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (a *app) terminalStreamHandler(w http.ResponseWriter, r *http.Request) {
+func (a *app) terminalWebsocketHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -389,7 +433,7 @@ func (a *app) terminalStreamHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id := strings.TrimPrefix(r.URL.Path, "/api/terminal/stream/")
+	id := strings.TrimPrefix(r.URL.Path, "/api/terminal/ws/")
 	id = strings.TrimSpace(id)
 	if id == "" {
 		http.Error(w, "session id required", http.StatusBadRequest)
@@ -401,16 +445,11 @@ func (a *app) terminalStreamHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+	conn, err := wsUpgrader.Upgrade(w, r, nil)
+	if err != nil {
 		return
 	}
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("X-Accel-Buffering", "no")
+	defer conn.Close()
 
 	ctx, cancel := context.WithCancel(r.Context())
 	a.streamMu.Lock()
@@ -426,11 +465,37 @@ func (a *app) terminalStreamHandler(w http.ResponseWriter, r *http.Request) {
 		cancel()
 	}()
 
-	buf := make([]byte, streamReadBufferSize)
+	go func() {
+		<-ctx.Done()
+		_ = conn.Close()
+	}()
 
-	if history, err := a.terminals.History(id); err == nil && len(history) > 0 {
+	if colsStr := strings.TrimSpace(r.URL.Query().Get("cols")); colsStr != "" {
+		if rowsStr := strings.TrimSpace(r.URL.Query().Get("rows")); rowsStr != "" {
+			cols, colsErr := strconv.Atoi(colsStr)
+			rows, rowsErr := strconv.Atoi(rowsStr)
+			if colsErr == nil && rowsErr == nil && cols > 0 && rows > 0 {
+				_ = a.terminals.Resize(id, uint16(cols), uint16(rows))
+			}
+		}
+	}
+
+	if snap, cols, rows, ok, err := a.terminals.Snapshot(id); err == nil && ok && len(snap) > 0 {
+		encoded := base64.StdEncoding.EncodeToString(snap)
+		payload := map[string]any{
+			"type": "snapshot",
+			"data": encoded,
+			"cols": cols,
+			"rows": rows,
+			"tmux": true,
+		}
+		if err := sendWSJSON(conn, payload); err != nil {
+			return
+		}
+	} else if history, err := a.terminals.History(id); err == nil && len(history) > 0 {
 		encoded := base64.StdEncoding.EncodeToString(history)
 		payload := map[string]any{
+			"type": "snapshot",
 			"data": encoded,
 		}
 		if session, ok := a.terminals.Get(id); ok {
@@ -438,38 +503,98 @@ func (a *app) terminalStreamHandler(w http.ResponseWriter, r *http.Request) {
 			payload["rows"] = session.LastRows
 			payload["updated_at"] = session.LastSnapshot
 		}
-		raw, err := json.Marshal(payload)
-		if err != nil {
+		if err := sendWSJSON(conn, payload); err != nil {
 			return
 		}
-		if _, err := fmt.Fprintf(w, "event: snapshot\ndata: %s\n\n", raw); err != nil {
-			return
-		}
-		flusher.Flush()
 	}
 
+	readErrCh := make(chan error, 1)
+	go func() {
+		for {
+			messageType, payload, err := conn.ReadMessage()
+			if err != nil {
+				readErrCh <- err
+				return
+			}
+			switch messageType {
+			case websocket.TextMessage:
+				a.handleWebsocketMessage(id, payload)
+			case websocket.BinaryMessage:
+				if len(payload) > 0 {
+					if _, err := a.terminals.Write(id, payload); err != nil {
+						log.Printf("terminal websocket input error: %v", err)
+					}
+				}
+			}
+		}
+	}()
+
+	buf := make([]byte, streamReadBufferSize)
 	for {
 		select {
 		case <-ctx.Done():
+			return
+		case <-readErrCh:
 			return
 		default:
 		}
 
 		n, readErr := a.terminals.Read(id, buf)
 		if n > 0 {
-			encoded := base64.StdEncoding.EncodeToString(buf[:n])
-			if _, err := fmt.Fprintf(w, "data: %s\n\n", encoded); err != nil {
+			if err := conn.WriteMessage(websocket.BinaryMessage, buf[:n]); err != nil {
 				return
 			}
-			flusher.Flush()
 		}
 		if readErr != nil {
 			if !errors.Is(readErr, io.EOF) {
-				log.Printf("terminal stream read error: %v", readErr)
+				log.Printf("terminal websocket read error: %v", readErr)
 			}
 			return
 		}
 	}
+}
+
+func (a *app) handleWebsocketMessage(id string, payload []byte) {
+	var msg struct {
+		Type string `json:"type"`
+		Data string `json:"data"`
+		Cols uint16 `json:"cols"`
+		Rows uint16 `json:"rows"`
+	}
+	if err := json.Unmarshal(payload, &msg); err != nil || msg.Type == "" {
+		if len(payload) == 0 {
+			return
+		}
+		if _, err := a.terminals.Write(id, payload); err != nil {
+			log.Printf("terminal websocket input error: %v", err)
+		}
+		return
+	}
+
+	switch msg.Type {
+	case "input":
+		if msg.Data == "" {
+			return
+		}
+		if _, err := a.terminals.Write(id, []byte(msg.Data)); err != nil {
+			log.Printf("terminal websocket input error: %v", err)
+		}
+	case "resize":
+		if msg.Cols == 0 || msg.Rows == 0 {
+			return
+		}
+		if err := a.terminals.Resize(id, msg.Cols, msg.Rows); err != nil {
+			log.Printf("terminal websocket resize error: %v", err)
+		}
+	}
+}
+
+func sendWSJSON(conn *websocket.Conn, payload any) error {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	return conn.WriteMessage(websocket.TextMessage, raw)
 }
 
 func (a *app) terminalInputHandler(w http.ResponseWriter, r *http.Request) {

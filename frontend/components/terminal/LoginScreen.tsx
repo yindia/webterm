@@ -1,6 +1,6 @@
 "use client";
 
-import { Moon, Sun, Terminal as TerminalIcon } from "lucide-react";
+import { Terminal as TerminalIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 
@@ -8,20 +8,16 @@ interface LoginScreenProps {
   password: string;
   loginError: string;
   loggingIn: boolean;
-  theme: "dark" | "light";
   onPasswordChange: (value: string) => void;
   onSubmit: () => void;
-  onThemeToggle: () => void;
 }
 
 export function LoginScreen({
   password,
   loginError,
   loggingIn,
-  theme,
   onPasswordChange,
   onSubmit,
-  onThemeToggle,
 }: LoginScreenProps) {
   return (
     <div className="flex h-screen w-screen items-center justify-center bg-[radial-gradient(circle_at_top,_var(--app-bg-highlight)_0%,_var(--app-bg)_55%,_var(--app-bg)_100%)] px-4">
@@ -31,19 +27,9 @@ export function LoginScreen({
             <TerminalIcon className="h-6 w-6" />
             <h1 className="text-xl font-semibold tracking-tight">webterm</h1>
           </div>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={onThemeToggle}
-              className="rounded-full border border-[var(--app-border)] p-1 text-[var(--app-text-muted)] transition hover:text-[var(--app-text)]"
-              aria-label="Toggle theme"
-            >
-              {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-            </button>
-            <span className="rounded-full border border-[var(--app-border)] px-2 py-0.5 text-[10px] uppercase tracking-[0.2em] text-[var(--app-text-muted)]">
-              Secure
-            </span>
-          </div>
+          <span className="rounded-full border border-[var(--app-border)] px-2 py-0.5 text-[10px] uppercase tracking-[0.2em] text-[var(--app-text-muted)]">
+            Secure
+          </span>
         </div>
         <p className="mb-6 text-sm text-[var(--app-text-muted)]">
           Access your terminal workspace securely from any device.

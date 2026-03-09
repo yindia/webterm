@@ -1,28 +1,19 @@
 "use client";
 
-import { Cpu, MemoryStick, Monitor, Moon, Sun, Terminal as TerminalIcon } from "lucide-react";
+import { Activity, Terminal as TerminalIcon } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 
-import type { MetricsSnapshot } from "./types";
-import { formatBytes } from "./utils";
-
 interface HeaderBarProps {
-  theme: "dark" | "light";
-  metrics: MetricsSnapshot | null;
   showConnected: boolean;
   isFullscreen: boolean;
-  onThemeToggle: () => void;
-  onMetricsOpen: (mode: "cpu" | "memory" | "gpu") => void;
+  onMonitoringOpen: () => void;
 }
 
 export function HeaderBar({
-  theme,
-  metrics,
   showConnected,
   isFullscreen,
-  onThemeToggle,
-  onMetricsOpen,
+  onMonitoringOpen,
 }: HeaderBarProps) {
   return (
     <header
@@ -42,39 +33,11 @@ export function HeaderBar({
       <div className="flex items-center gap-3 max-sm:flex-wrap max-sm:justify-end max-sm:gap-2">
         <button
           type="button"
-          onClick={onThemeToggle}
-          className="rounded-full border border-[var(--app-border)] p-1 text-[var(--app-text-muted)] transition hover:text-[var(--app-text)] max-sm:h-7 max-sm:w-7"
-          aria-label="Toggle theme"
-        >
-          {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-        </button>
-        <button
-          type="button"
           className="flex items-center gap-1 rounded-full border border-[var(--app-border)] px-2 py-1 text-[11px] text-[var(--app-text-muted)] max-sm:px-1.5 max-sm:py-0.5"
-          onClick={() => onMetricsOpen("cpu")}
+          onClick={onMonitoringOpen}
         >
-          <Cpu className="h-3.5 w-3.5" />
-          <span className="max-sm:hidden">
-            {metrics?.cpu?.available ? `${metrics.cpu.usage_percent.toFixed(0)}%` : "N/A"}
-          </span>
-        </button>
-        <button
-          type="button"
-          className="flex items-center gap-1 rounded-full border border-[var(--app-border)] px-2 py-1 text-[11px] text-[var(--app-text-muted)] max-sm:px-1.5 max-sm:py-0.5"
-          onClick={() => onMetricsOpen("memory")}
-        >
-          <MemoryStick className="h-3.5 w-3.5" />
-          <span className="max-w-[72px] truncate whitespace-nowrap sm:max-w-none max-sm:hidden">
-            {metrics?.memory?.available ? formatBytes(metrics.memory.used_bytes) : "N/A"}
-          </span>
-        </button>
-        <button
-          type="button"
-          className="flex items-center gap-1 rounded-full border border-[var(--app-border)] px-2 py-1 text-[11px] text-[var(--app-text-muted)] max-sm:px-1.5 max-sm:py-0.5"
-          onClick={() => onMetricsOpen("gpu")}
-        >
-          <Monitor className="h-3.5 w-3.5" />
-          <span className="max-sm:hidden">{metrics?.gpu?.available ? "On" : "N/A"}</span>
+          <Activity className="h-3.5 w-3.5" />
+          <span className="max-sm:hidden">Monitor</span>
         </button>
         <span
           className={cn(

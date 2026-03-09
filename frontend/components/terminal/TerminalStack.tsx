@@ -23,17 +23,21 @@ export function TerminalStack({
 }: TerminalStackProps) {
   const renderNode = (node: LayoutNode) => {
     return (
-      <div
-        key={node.id}
-        className={cn(
-          "relative min-h-0 min-w-0 flex-1 overflow-hidden",
-          node.id === activePaneId && "ring-1 ring-[var(--app-accent)]",
-        )}
-        onClick={() => onActivatePane(node.id)}
-        ref={(el) => registerPaneRef(node.id, el)}
-      />
-    );
-  };
+        <div
+          key={node.id}
+          className={cn(
+            "relative min-h-0 min-w-0 flex-1 overflow-hidden",
+            node.id === activePaneId && "ring-1 ring-[var(--app-accent)]",
+          )}
+          onClick={() => {
+            if (node.id !== activePaneId) {
+              onActivatePane(node.id);
+            }
+          }}
+          ref={(el) => registerPaneRef(node.id, el)}
+        />
+      );
+    };
 
   return (
     <div className="flex min-w-0 w-full flex-1 flex-col">
@@ -52,7 +56,11 @@ export function TerminalStack({
             <p className="text-sm text-[var(--app-text-muted)]">No active terminal tab</p>
           </div>
         )}
-        <div ref={containerParentRef} className="sr-only" />
+		<div
+			ref={containerParentRef}
+			className="absolute inset-0 pointer-events-none opacity-0"
+			aria-hidden="true"
+		/>
       </div>
       <div className="sr-only" />
     </div>

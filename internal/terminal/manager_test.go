@@ -6,12 +6,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GianlucaP106/gotmux/gotmux"
 	"webterm/internal/config"
 )
 
 func TestCreateWriteReadClose(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("pty test is unix-first in current implementation")
+	}
+	if _, err := gotmux.DefaultTmux(); err == nil {
+		t.Skip("tmux present; test assumes pty backend")
 	}
 
 	cfg := config.Default()

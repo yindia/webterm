@@ -12,6 +12,7 @@ Self-hosted browser terminal with multi-session tabs, modern UI, and cross-platf
 - Multiple terminal sessions with tabs, detach, and keyboard shortcuts
 - Cross-platform CPU/memory/GPU metrics (macOS, Linux, Windows)
 - Session snapshots and restore support
+- Agent session monitoring dashboard (daemon + SSE)
 - Plain password auth + rate limiting
 - Mobile-friendly UI
 
@@ -43,6 +44,7 @@ Key settings include:
 - `auth.mode` and `auth.password`
 - `terminal.shell` and `terminal.working_dir`
 - `sessions.max_sessions` and snapshot settings
+- `monitoring.db_path`, `monitoring.sample_interval`, `monitoring.retention`
 
 ## Authentication
 
@@ -58,11 +60,28 @@ Password auth only.
 
 ## CLI Commands
 
-- `webterm serve` — start the server
+- `webterm serve` / `webterm up` — start the server
+- `webterm status` — show monitoring summary
+- `webterm notify SESSION --title "MESSAGE"` — send monitoring notification
+- `webterm agent-setup` — install agent helper script
 - `webterm doctor` — environment diagnostics
 - `webterm config init` — create config template
 - `webterm version` — build metadata
 - `webterm completion [bash|zsh|fish]` — shell completions
+
+## Monitoring
+
+The monitoring daemon runs automatically when you start the server. Use `webterm status` for a CLI overview, or open the Monitor panel in the UI.
+
+Example config:
+
+```yaml
+monitoring:
+  enabled: true
+  db_path: "~/.webterm/monitoring.db"
+  sample_interval: 10s
+  retention: 168h
+```
 
 ## Development
 

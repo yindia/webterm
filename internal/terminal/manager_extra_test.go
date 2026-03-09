@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/GianlucaP106/gotmux/gotmux"
 	"github.com/creack/pty"
 
 	"webterm/internal/config"
@@ -259,6 +260,9 @@ func TestMaxSessionsLimit(t *testing.T) {
 	if _, err := os.Stat("/bin/bash"); err != nil {
 		t.Skip("shell not available")
 	}
+	if _, err := gotmux.DefaultTmux(); err == nil {
+		t.Skip("tmux present; session limit tests assume pty backend")
+	}
 	cfg := config.Default()
 	cfg.Sessions.MaxSessions = 1
 	cfg.Terminal.Shell = "/bin/bash"
@@ -283,6 +287,9 @@ func TestCloseAllClearsSessions(t *testing.T) {
 	}
 	if _, err := os.Stat("/bin/bash"); err != nil {
 		t.Skip("shell not available")
+	}
+	if _, err := gotmux.DefaultTmux(); err == nil {
+		t.Skip("tmux present; session limit tests assume pty backend")
 	}
 	cfg := config.Default()
 	cfg.Sessions.MaxSessions = 2
@@ -311,6 +318,9 @@ func TestRestoreSnapshotsCreatesSession(t *testing.T) {
 	}
 	if _, err := os.Stat("/bin/bash"); err != nil {
 		t.Skip("shell not available")
+	}
+	if _, err := gotmux.DefaultTmux(); err == nil {
+		t.Skip("tmux present; snapshots are disabled when tmux is available")
 	}
 
 	dir := t.TempDir()

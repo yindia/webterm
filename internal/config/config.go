@@ -9,12 +9,13 @@ import (
 )
 
 type Config struct {
-	Server   ServerConfig   `yaml:"server"`
-	Auth     AuthConfig     `yaml:"auth"`
-	Terminal TerminalConfig `yaml:"terminal"`
-	Policy   PolicyConfig   `yaml:"policy"`
-	Sessions SessionConfig  `yaml:"sessions"`
-	Logging  LoggingConfig  `yaml:"logging"`
+	Server     ServerConfig     `yaml:"server"`
+	Auth       AuthConfig       `yaml:"auth"`
+	Terminal   TerminalConfig   `yaml:"terminal"`
+	Policy     PolicyConfig     `yaml:"policy"`
+	Sessions   SessionConfig    `yaml:"sessions"`
+	Monitoring MonitoringConfig `yaml:"monitoring"`
+	Logging    LoggingConfig    `yaml:"logging"`
 }
 
 type ServerConfig struct {
@@ -56,6 +57,14 @@ type SessionConfig struct {
 	SnapshotKey      string        `yaml:"snapshot_key"`
 }
 
+type MonitoringConfig struct {
+	Enabled        bool          `yaml:"enabled"`
+	DBPath         string        `yaml:"db_path"`
+	SampleInterval time.Duration `yaml:"sample_interval"`
+	Retention      time.Duration `yaml:"retention"`
+	Token          string        `yaml:"token"`
+}
+
 type LoggingConfig struct {
 	Audit bool   `yaml:"audit"`
 	Level string `yaml:"level"`
@@ -90,6 +99,13 @@ func Default() Config {
 			SnapshotDir:      "~/.webterm/snapshots",
 			SnapshotInterval: 5 * time.Second,
 			SnapshotKey:      "",
+		},
+		Monitoring: MonitoringConfig{
+			Enabled:        true,
+			DBPath:         "~/.webterm/webterm.db",
+			SampleInterval: 10 * time.Second,
+			Retention:      7 * 24 * time.Hour,
+			Token:          "",
 		},
 		Logging: LoggingConfig{
 			Audit: true,

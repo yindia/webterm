@@ -9,6 +9,9 @@ func NewRootCommand() *cobra.Command {
 	}
 
 	root.AddCommand(newServeCommand())
+	root.AddCommand(newStatusCommand())
+	root.AddCommand(newNotifyCommand())
+	root.AddCommand(newAgentSetupCommand())
 	root.AddCommand(newDoctorCommand())
 	root.AddCommand(newConfigCommand())
 	root.AddCommand(newVersionCommand())

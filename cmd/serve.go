@@ -8,10 +8,12 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"webterm/internal/config"
+	"webterm/internal/monitoring"
 	"webterm/internal/server"
 )
 
@@ -21,8 +23,9 @@ func newServeCommand() *cobra.Command {
 	var configPath string
 
 	cmd := &cobra.Command{
-		Use:   "serve",
-		Short: "Start webterm server",
+		Use:     "serve",
+		Aliases: []string{"up"},
+		Short:   "Start webterm server",
 		RunE: func(_ *cobra.Command, _ []string) error {
 			cfg, err := config.Load(configPath)
 			if err != nil {
@@ -46,10 +49,30 @@ func newServeCommand() *cobra.Command {
 			ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer cancel()
 
+			if cfg.Monitoring.Enabled {
+				go runMonitoringDaemon(ctx, cfg)
+			}
+
 			return runServer(ctx, cfg)
 		},
 	}
 
 	cmd.Flags().StringVar(&configPath, "config", "webterm.yaml", "path to config file")
 	return cmd
+}
+
+func runMonitoringDaemon(ctx context.Context, cfg config.Config) {
+	url := serverURL(cfg)
+	daemon := monitoring.NewDaemon(url, cfg.Monitoring.Token, cfg.Monitoring.SampleInterval)
+	daemon.EnableTmux()
+	for {
+		if err := daemon.Run(ctx); err != nil {
+			if errors.Is(err, context.Canceled) {
+				return
+			}
+			time.Sleep(2 * time.Second)
+			continue
+		}
+		return
+	}
 }
